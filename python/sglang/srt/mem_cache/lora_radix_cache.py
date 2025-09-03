@@ -2,14 +2,22 @@
 
 import heapq
 import time
+import logging
 from collections import defaultdict
 from typing import TYPE_CHECKING, Any, List, Optional
 
 import torch
 
+from sglang.srt.disaggregation.kv_events import (
+    AllBlocksCleared,
+    BlockRemoved,
+    BlockStored,
+)
 from sglang.srt.mem_cache.allocator import BaseTokenToKVPoolAllocator
 from sglang.srt.mem_cache.base_prefix_cache import BasePrefixCache, MatchResult
 from sglang.srt.mem_cache.memory_pool import ReqToTokenPool
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from sglang.srt.managers.schedule_batch import Req
@@ -50,12 +58,44 @@ class LoRATreeNode:
         self.lock_ref = 0
         self.last_access_time = time.monotonic()
 
+        self.hit_count = 0
+        # indicating the node is loading KV cache from host
+        self.loading = False
+        # indicating the node is locked to protect from eviction
+        # incremented when the node is referenced by a storage operation
+        self.host_ref_counter = 0
+        # store the host indices of KV cache
+        self.host_value: Optional[torch.Tensor] = None
+        # store hash values of each pages
+        self.hash_value: Optional[List[str]] = None
+
         self.id = LoRATreeNode.counter if id is None else id
         LoRATreeNode.counter += 1
 
     @property
     def evicted(self):
         return self.value is None
+
+    @property
+    def backuped(self):
+        return self.host_value is not None
+
+    def protect_host(self):
+        """Protect the host value from eviction."""
+        self.host_ref_counter += 1
+
+    def release_host(self):
+        """Release the host value, allowing it to be evicted."""
+        if self.host_ref_counter > 0:
+            self.host_ref_counter -= 1
+        else:
+            raise RuntimeError("Host reference counter is already zero.")
+
+    def get_last_hash_value(self) -> Optional[str]:
+        """Returns the hash value of the last page in this node."""
+        if self.hash_value is None or len(self.hash_value) == 0:
+            return None
+        return self.hash_value[-1]
 
     def __lt__(self, other: "LoRATreeNode"):
         return self.last_access_time < other.last_access_time
@@ -75,13 +115,13 @@ def _key_match(key0: LoRAKey, key1: LoRAKey):
 
 
 class LoRARadixCache(BasePrefixCache):
-
     def __init__(
         self,
         req_to_token_pool: ReqToTokenPool,
         token_to_kv_pool_allocator: BaseTokenToKVPoolAllocator,
         page_size: int,
         disable: bool = False,
+        enable_kv_cache_events: bool = False
     ):
         if page_size > 1:
             raise ValueError("LoRARadixCache currently only supports page_size = 1")
@@ -95,18 +135,28 @@ class LoRARadixCache(BasePrefixCache):
         self.token_to_kv_pool_allocator = token_to_kv_pool_allocator
         self.page_size = page_size
         self.disable = disable
-        self.device = self.token_to_kv_pool_allocator.device
+        self.enable_kv_cache_events = enable_kv_cache_events
+        self.kv_event_queue = []
+
+        if self.token_to_kv_pool_allocator:
+            self.device = self.token_to_kv_pool_allocator.device
+        else:
+            self.device = torch.device("cpu")
 
         self.key_match_fn = _key_match
         self.get_child_key_fn = get_child_key
         self.reset()
+        logger.info(f"LoRARadixCache initialized with page_size = {self.page_size}, disable = {self.disable}, enable_kv_cache_events = {self.enable_kv_cache_events}")
 
     def reset(self):
         self.root_node = LoRATreeNode()
         self.root_node.key = LoRAKey(lora_id="", token_ids=[])
-        self.root_node.value = None
+        self.root_node.value = []
+        self.root_node.host_value = []
+        self.root_node.lock_ref = 1
         self.evictable_size_ = 0
         self.protected_size_ = 0
+        self._record_all_cleared_event()
 
     def match_prefix(self, key: List[int], **kwargs) -> MatchResult:
         raise ValueError(
@@ -146,7 +196,7 @@ class LoRARadixCache(BasePrefixCache):
             last_host_node=last_node,
         )
 
-    def insert(self, key: LoRAKey, value=None):
+    def insert(self, key: LoRAKey, value=None, chunked=False):
         if self.disable:
             return 0
 
@@ -199,7 +249,7 @@ class LoRARadixCache(BasePrefixCache):
 
         # Radix Cache takes one ref in memory pool
         inserted_key = LoRAKey(lora_id=req.lora_id, token_ids=page_aligned_token_ids)
-        new_prefix_len = self.insert(inserted_key, page_aligned_kv_indices)
+        new_prefix_len = self.insert(inserted_key, page_aligned_kv_indices, chunked=chunked)
         self.token_to_kv_pool_allocator.free(
             kv_indices[len(req.prefix_indices) : new_prefix_len]
         )
@@ -247,6 +297,8 @@ class LoRARadixCache(BasePrefixCache):
 
             if len(x.parent.children) == 0:
                 heapq.heappush(leaves, x.parent)
+            
+            self._record_remove_event(x)
 
     def inc_lock_ref(self, node: LoRATreeNode):
         if self.disable:
@@ -323,6 +375,7 @@ class LoRARadixCache(BasePrefixCache):
 
     def _split_node(self, key: LoRAKey, child: LoRATreeNode, split_len: int):
         # new_node -> child
+        self._record_remove_event(child)
         new_node = LoRATreeNode()
         key_split_1 = LoRAKey(lora_id=key.lora_id, token_ids=key.token_ids[:split_len])
         key_split_2 = LoRAKey(lora_id=key.lora_id, token_ids=key.token_ids[split_len:])
@@ -335,6 +388,9 @@ class LoRARadixCache(BasePrefixCache):
         child.key = key_split_2
         child.value = child.value[split_len:]
         new_node.parent.children[self.get_child_key_fn(key)] = new_node
+        
+        self._record_store_event(new_node)
+        self._record_store_event(child)
 
         return new_node
 
@@ -368,6 +424,9 @@ class LoRARadixCache(BasePrefixCache):
             new_node.value = value
             node.children[child_key] = new_node
             self.evictable_size_ += len(value)
+            self._record_store_event(new_node)
+        
+        assert len(node.key) == len(node.value)
         return total_prefix_length
 
     def _print_helper(self, node: LoRATreeNode, indent: int):
@@ -419,3 +478,61 @@ class LoRARadixCache(BasePrefixCache):
                 stack.extend(cur_node.children.values())
 
         return ret_list
+
+    def _record_store_event(self, node: LoRATreeNode):
+        # One BlockStored per ``page_size`` chunk.
+        if self.enable_kv_cache_events:
+            # First chunk links to the last page of the parent node (if any).
+            if node.parent is None or node != self.root_node:
+                parent_block_hash = None
+            else:
+                last_page_start = ((len(node.parent.key) - 1) // self.page_size) * self.page_size
+                parent_parent_tokens = node.parent.key.token_ids[last_page_start:]
+                parent_block_hash = hash((node.parent.key.lora_id, tuple(parent_parent_tokens)))
+
+            for start in range(0, len(node.key), self.page_size):
+                page_tokens = node.key.token_ids[start : start + self.page_size]
+                if not page_tokens:
+                    continue
+
+                block_hash = hash((node.key.lora_id, tuple(page_tokens)))
+
+                self.kv_event_queue.append(
+                    BlockStored(
+                        block_hashes=[block_hash],
+                        parent_block_hash=parent_block_hash,
+                        token_ids=page_tokens,
+                        block_size=len(page_tokens),
+                        lora_id=node.key.lora_id,
+                    )
+                )
+
+                # Chain next chunk to this one.
+                parent_block_hash = block_hash
+
+    def _record_remove_event(self, node: LoRATreeNode):
+        # One BlockRemoved per chunk.
+        if self.enable_kv_cache_events:
+            for start in range(0, len(node.key), self.page_size):
+                page_tokens = node.key.token_ids[start : start + self.page_size]
+                if not page_tokens:
+                    continue
+                block_hash = hash((node.key.lora_id, tuple(page_tokens)))
+                self.kv_event_queue.append(BlockRemoved(block_hashes=[block_hash]))
+
+    def _record_all_cleared_event(self):
+        if self.enable_kv_cache_events:
+            self.kv_event_queue.append(AllBlocksCleared())
+
+    def take_events(self):
+        """Atomically takes all events and clears the queue.
+
+        Returns:
+            A list of KV cache events.
+        """
+        if not self.enable_kv_cache_events:
+            return []
+        events = self.kv_event_queue
+        self.kv_event_queue = []
+        return events
+
