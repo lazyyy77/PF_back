@@ -228,7 +228,10 @@ class CompletionRequest(BaseModel):
 
     # For request id
     rid: Optional[Union[List[str], str]] = None
-
+    
+    # For PFEngine Backend
+    agent_id: Optional[Union[List[str], str]] = None
+    
     @field_validator("max_tokens")
     @classmethod
     def validate_max_tokens_positive(cls, v):
@@ -450,6 +453,8 @@ class ChatCompletionRequest(BaseModel):
         "Currently only supported for OpenAI models.",
     )
 
+    # For PFEngine Backend
+    agent_id: Optional[Union[List[str], str]] = None
     lora_path: Optional[Union[List[Optional[str]], Optional[str]]] = None
 
     @model_validator(mode="before")

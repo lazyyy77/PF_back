@@ -24,6 +24,7 @@ import time
 from collections import defaultdict
 from functools import partial
 from typing import TYPE_CHECKING, List, Optional
+import math
 
 import torch
 
@@ -35,16 +36,42 @@ from sglang.srt.disaggregation.kv_events import (
 from sglang.srt.mem_cache.allocator import BaseTokenToKVPoolAllocator
 from sglang.srt.mem_cache.base_prefix_cache import BasePrefixCache, MatchResult
 from sglang.srt.mem_cache.memory_pool import ReqToTokenPool
+from sglang.srt.managers.agent_manager import AgentManager
 
 if TYPE_CHECKING:
     from sglang.srt.managers.schedule_batch import Req
 
+class AgentInfo:
+    def __init__(self, agent_id: str, priority: float, hit_cnt: int, last_call_time: int, continue_call: int):
+        self.agent_id = agent_id
+        self.inner_priority = priority
+        self.hit_cnt = hit_cnt
+        self.last_call_time = last_call_time
+        self.continue_call = continue_call
+    
+    def update_priority(self):
+        """Calculate the priority of the agent based on its hit count and last call time."""
+        self.inner_priority = self.hit_cnt
+        return self.inner_priority
+
+    def update_priority_locality(self):
+        """Calculate the priority of the agent based on its locality."""
+        decay = 1 / (1 + math.exp( -0.1 * (self.last_call_time - 1)))
+        self.inner_priority = self.hit_cnt * decay + self.continue_call
+        return self.inner_priority
+
+    def get_priority(self):
+        """Get the current priority of the agent."""
+        return self.inner_priority
+    
+    def get_agent(self):
+        return self.agent_id
 
 class TreeNode:
 
     counter = 0
 
-    def __init__(self, id: Optional[int] = None):
+    def __init__(self, id: Optional[int] = None, cache: Optional[RadixCache] = None):
         self.children = defaultdict(TreeNode)
         self.parent: TreeNode = None
         self.key: List[int] = None
@@ -65,6 +92,13 @@ class TreeNode:
 
         self.id = TreeNode.counter if id is None else id
         TreeNode.counter += 1
+
+        # For PFEngine
+        # Each node's corresponding agents is represented as a str index dict: 
+        # (agent_id: str, priority: float, hit_cnt: int, last_call_time: int, continue_call: int)
+        self.agents: dict[str, AgentInfo] = {}
+        self.cache = cache
+
 
     @property
     def evicted(self):
@@ -124,6 +158,7 @@ class RadixCache(BasePrefixCache):
         page_size: int,
         disable: bool = False,
         enable_kv_cache_events: bool = False,
+        agent_manager: Optional[AgentManager] = None,
     ):
         self.req_to_token_pool = req_to_token_pool
         self.token_to_kv_pool_allocator = token_to_kv_pool_allocator
@@ -131,6 +166,7 @@ class RadixCache(BasePrefixCache):
         self.disable = disable
         self.enable_kv_cache_events = enable_kv_cache_events
         self.kv_event_queue = []
+        self.agent_manager = agent_manager
 
         if self.token_to_kv_pool_allocator:
             self.device = self.token_to_kv_pool_allocator.device
@@ -148,7 +184,7 @@ class RadixCache(BasePrefixCache):
     ##### Public API #####
 
     def reset(self):
-        self.root_node = TreeNode()
+        self.root_node = TreeNode(cache=self)
         self.root_node.key = []
         self.root_node.value = []
         self.root_node.host_value = []
@@ -394,7 +430,7 @@ class RadixCache(BasePrefixCache):
     def _split_node(self, key, child: TreeNode, split_len: int):
         # new_node -> child
         self._record_remove_event(child)
-        new_node = TreeNode()
+        new_node = TreeNode(cache=self)
         new_node.children = {self.get_child_key_fn(key[split_len:]): child}
         new_node.parent = child.parent
         new_node.lock_ref = child.lock_ref
@@ -434,7 +470,7 @@ class RadixCache(BasePrefixCache):
                 child_key = self.get_child_key_fn(key)
 
         if len(key):
-            new_node = TreeNode()
+            new_node = TreeNode(cache=self)
             new_node.parent = node
             new_node.key = key
             new_node.value = value

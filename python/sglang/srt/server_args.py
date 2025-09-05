@@ -383,6 +383,13 @@ class ServerArgs:
     enable_triton_kernel_moe: bool = False
     enable_flashinfer_mxfp4_moe: bool = False
 
+    # For PFEngine Backend
+    load_ahead_step: int = 2
+    evict_pri_level: int = 4
+    self_debug: bool = False
+    disable_prefetch: bool = False
+
+
     def __post_init__(self):
         # Check deprecated arguments
         if self.enable_ep_moe:
@@ -2115,6 +2122,29 @@ class ServerArgs:
             action="store_true",
             help="(Deprecated) Enable FlashInfer MXFP4 MoE backend for modelopt_fp4 quant on Blackwell.",
         )
+        parser.add_argument(
+            "--load-ahead-step",
+            type=int,
+            default=ServerArgs.load_ahead_step,
+            help="Step to load ahead when prefetching"
+        )
+        parser.add_argument(
+            "--evict-pri-level",
+            type=int,
+            default=ServerArgs.evict_pri_level,
+            help="Priority level when evicting from leaf nodes"
+        )
+        parser.add_argument(
+            "--self-debug",
+            action="store_true",
+            help="Enable self-debugging"
+        )
+        parser.add_argument(
+            "--disable-prefetch",
+            action="store_true",
+            help="Disable prefetching"
+        )
+
 
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace):
