@@ -1077,6 +1077,20 @@ async def v1_cancel_responses(response_id: str, raw_request: Request):
         response_id
     )
 
+@app.post("/v1/update")
+async def v1_update(update_map: dict[str, Any]):
+    """Update agent priorities via AgentManager"""
+    try:
+        # Call the tokenizer manager to send update request to scheduler
+        if _global_state.tokenizer_manager is not None:
+            logger.info(f"Updating agent timestep with: {update_map}")
+            _global_state.tokenizer_manager.update_agent_timestep(update_map)
+            return {"status": "success", "message": "Agent timesteps updated successfully"}
+        else:
+            return {"status": "error", "message": "TokenizerManager not available"}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to update agent timesteps: {str(e)}"}
+
 
 @app.api_route(
     "/v1/rerank", methods=["POST", "PUT"], dependencies=[Depends(validate_json_request)]
@@ -1390,6 +1404,12 @@ def _wait_and_warmup(
     else:
         _global_state.tokenizer_manager.server_status = ServerStatus.Up
 
+    try:
+        ret = asyncio.run(_global_state.tokenizer_manager.flush_cache())
+        logger.info(f"Cache flushed automatically after warmup: {ret}")
+    except Exception as e:
+        logger.error(f"Failed to flush cache after warmup: {e}")
+        
     logger.info("The server is fired up and ready to roll!")
 
     if pipe_finish_writer is not None:

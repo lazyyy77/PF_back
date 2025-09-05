@@ -128,6 +128,9 @@ class GenerateReqInput:
     # For background responses (OpenAI responses API)
     background: bool = False
 
+    # For PFEngine Backend
+    agent_id: Optional[Union[List[str], str]] = None
+
     def contains_mm_input(self) -> bool:
         return (
             has_valid_data(self.image_data)
@@ -479,6 +482,7 @@ class GenerateReqInput:
             data_parallel_rank=(
                 self.data_parallel_rank if self.data_parallel_rank is not None else None
             ),
+            agent_id=self.agent_id,
         )
 
 
@@ -531,6 +535,9 @@ class TokenizedGenerateReqInput:
 
     # For dp balance
     dp_balance_id: int = -1
+
+    # For PFEngine Backend
+    agent_id: Optional[str] = None
 
 
 @dataclass
@@ -1208,3 +1215,17 @@ class BlockReqType(Enum):
 @dataclass
 class BlockReqInput:
     type: BlockReqType
+
+
+@dataclass
+class UpdateAgentTimestepReq:
+    # The update dictionary for agent priorities
+    agent_data: Dict[str, Any]
+    timestep_data: Dict[int, List[str]]
+    timestep_cnt: int
+
+
+@dataclass
+class SelfDebugReq:
+    prompt: list[int]
+    agent_id: str
