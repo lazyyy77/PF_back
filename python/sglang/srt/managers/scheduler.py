@@ -101,6 +101,7 @@ from sglang.srt.managers.io_struct import (
     TokenizedGenerateReqInput,
     UnloadLoRAAdapterReqInput,
     UnloadLoRAAdapterReqOutput,
+    UpdateLoraRegistryReq,
     UpdateWeightFromDiskReqInput,
     UpdateWeightsFromDistributedReqInput,
     UpdateWeightsFromTensorReqInput,
@@ -137,6 +138,7 @@ from sglang.srt.managers.tp_worker_overlap_thread import TpModelWorkerClient
 from sglang.srt.managers.utils import DPBalanceMeta, validate_input_length
 from sglang.srt.mem_cache.chunk_cache import ChunkCache, SWAChunkCache
 from sglang.srt.mem_cache.hiradix_cache import HiRadixCache
+from sglang.srt.mem_cache.lora_hiradix_cache import LoRAHiRadixCache
 from sglang.srt.mem_cache.lora_radix_cache import LoRARadixCache
 from sglang.srt.mem_cache.radix_cache import RadixCache
 from sglang.srt.mem_cache.swa_radix_cache import SWARadixCache
@@ -253,6 +255,10 @@ class Scheduler(
             )
         )
 
+
+        # PFEngine
+        self.lora_registry: Dict[str, str] = dict()
+
         # Init model config
         self.model_config = ModelConfig.from_server_args(server_args)
 
@@ -262,6 +268,9 @@ class Scheduler(
         if self.pp_rank == 0 and self.attn_tp_rank == 0:
             self.recv_from_tokenizer = get_zmq_socket(
                 context, zmq.PULL, port_args.scheduler_input_ipc_name, False
+            )
+            self.recv_from_tokenizer_control = get_zmq_socket(
+                context, zmq.PULL, port_args.scheduler_control_ipc_name, False
             )
             self.recv_from_rpc = get_zmq_socket(
                 context, zmq.DEALER, port_args.rpc_ipc_name, False
@@ -285,11 +294,13 @@ class Scheduler(
                 self.idle_sleeper = IdleSleeper(
                     [
                         self.recv_from_tokenizer,
+                        self.recv_from_tokenizer_control,
                         self.recv_from_rpc,
                     ]
                 )
         else:
             self.recv_from_tokenizer = None
+            self.recv_from_tokenizer_control = None
             self.recv_from_rpc = None
             self.send_to_tokenizer = SimpleNamespace(send_pyobj=lambda x: None)
             self.send_to_detokenizer = SimpleNamespace(send_pyobj=lambda x: None)
@@ -334,6 +345,8 @@ class Scheduler(
             dp_rank=dp_rank,
             nccl_port=port_args.nccl_port,
         )
+
+        self.lora_manager = self.tp_worker.model_runner.lora_manager
 
         # Launch a draft worker for speculative decoding
         if self.spec_algorithm.is_eagle():
@@ -542,6 +555,7 @@ class Scheduler(
                 (LoadLoRAAdapterReqInput, self.load_lora_adapter),
                 (UnloadLoRAAdapterReqInput, self.unload_lora_adapter),
                 (MultiTokenizerRegisterReq, self.register_multi_tokenizer),
+                (UpdateLoraRegistryReq, self.update_lora_registry),
             ]
         )
 
@@ -553,6 +567,8 @@ class Scheduler(
             assert dp_balance_meta is not None
 
         self.recv_dp_balance_id_this_term = []
+        
+        # PF
 
     def init_tokenizer(self):
         server_args = self.server_args
@@ -616,25 +632,49 @@ class Scheduler(
                     enable_kv_cache_events=self.enable_kv_cache_events,
                 )
             elif self.enable_hierarchical_cache:
-                self.tree_cache = HiRadixCache(
-                    req_to_token_pool=self.req_to_token_pool,
-                    token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
-                    tp_cache_group=(
-                        self.attn_tp_cpu_group
-                        if self.server_args.enable_dp_attention
-                        else self.tp_cpu_group
-                    ),
-                    page_size=self.page_size,
-                    hicache_ratio=server_args.hicache_ratio,
-                    hicache_size=server_args.hicache_size,
-                    hicache_write_policy=server_args.hicache_write_policy,
-                    hicache_io_backend=server_args.hicache_io_backend,
-                    hicache_mem_layout=server_args.hicache_mem_layout,
-                    hicache_storage_backend=server_args.hicache_storage_backend,
-                    hicache_storage_prefetch_policy=server_args.hicache_storage_prefetch_policy,
-                    model_name=server_args.served_model_name,
-                    storage_backend_extra_config=server_args.hicache_storage_backend_extra_config,
-                )
+                if self.enable_lora:
+                    assert (
+                        self.schedule_policy == "fcfs"
+                    ), "LoRA hiradix cache only supports FCFS policy"
+                    self.tree_cache = LoRAHiRadixCache(
+                        req_to_token_pool=self.req_to_token_pool,
+                        token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
+                        tp_cache_group=(
+                            self.attn_tp_cpu_group
+                            if self.server_args.enable_dp_attention
+                            else self.tp_cpu_group
+                        ),
+                        page_size=self.page_size,
+                        hicache_ratio=server_args.hicache_ratio,
+                        hicache_size=server_args.hicache_size,
+                        hicache_write_policy=server_args.hicache_write_policy,
+                        hicache_io_backend=server_args.hicache_io_backend,
+                        hicache_mem_layout=server_args.hicache_mem_layout,
+                        hicache_storage_backend=server_args.hicache_storage_backend,
+                        hicache_storage_prefetch_policy=server_args.hicache_storage_prefetch_policy,
+                        model_name=server_args.served_model_name,
+                        storage_backend_extra_config=server_args.hicache_storage_backend_extra_config,
+                    )
+                else:
+                    self.tree_cache = HiRadixCache(
+                        req_to_token_pool=self.req_to_token_pool,
+                        token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
+                        tp_cache_group=(
+                            self.attn_tp_cpu_group
+                            if self.server_args.enable_dp_attention
+                            else self.tp_cpu_group
+                        ),
+                        page_size=self.page_size,
+                        hicache_ratio=server_args.hicache_ratio,
+                        hicache_size=server_args.hicache_size,
+                        hicache_write_policy=server_args.hicache_write_policy,
+                        hicache_io_backend=server_args.hicache_io_backend,
+                        hicache_mem_layout=server_args.hicache_mem_layout,
+                        hicache_storage_backend=server_args.hicache_storage_backend,
+                        hicache_storage_prefetch_policy=server_args.hicache_storage_prefetch_policy,
+                        model_name=server_args.served_model_name,
+                        storage_backend_extra_config=server_args.hicache_storage_backend_extra_config,
+                    )
                 self.tp_worker.register_hicache_layer_transfer_counter(
                     self.tree_cache.cache_controller.layer_done_counter
                 )
@@ -670,7 +710,7 @@ class Scheduler(
                     disable=server_args.disable_radix_cache,
                     enable_kv_cache_events=self.enable_kv_cache_events,
                 )
-
+        logger.warning(f"tree cache: {self.tree_cache}")
         self.decode_mem_cache_buf_multiplier = (
             1
             if self.spec_algorithm.is_none()
@@ -782,6 +822,13 @@ class Scheduler(
     def init_moe_config(self):
         if hasattr(self.model_config.hf_config, "num_experts_per_tok"):
             initialize_moe_config(self.server_args)
+
+    def _is_control_message(self, recv_req) -> bool:
+        
+        control_message_types = (
+            UpdateLoraRegistryReq,
+        )
+        return isinstance(recv_req, control_message_types)
 
     @DynamicGradMode()
     def event_loop_normal(self):
@@ -1001,6 +1048,13 @@ class Scheduler(
 
                 while True:
                     try:
+                        recv_control = self.recv_from_tokenizer_control.recv_pyobj(zmq.NOBLOCK)
+                    except zmq.ZMQError:
+                        break
+                    recv_reqs.append(recv_control)
+
+                while True:
+                    try:
                         recv_rpc = self.recv_from_rpc.recv_pyobj(zmq.NOBLOCK)
                     except zmq.ZMQError:
                         break
@@ -1080,7 +1134,25 @@ class Scheduler(
         return recv_reqs
 
     def process_input_requests(self, recv_reqs: List):
+
+        control_reqs = []
+        normal_reqs = []
+        
         for recv_req in recv_reqs:
+            if self._is_control_message(recv_req):
+                control_reqs.append(recv_req)
+            else:
+                normal_reqs.append(recv_req)
+        
+        for recv_req in control_reqs:
+            try:
+                output = self._request_dispatcher(recv_req)
+                logger.debug(f"Processed control message: {type(recv_req).__name__}")
+
+            except Exception as e:
+                logger.error(f"Error processing control message {recv_req}: {e}")
+        
+        for recv_req in normal_reqs:
             # If it is a health check generation request and there are running requests, ignore it.
             if is_health_check_generate_req(recv_req) and (
                 self.chunked_req is not None
@@ -2558,6 +2630,21 @@ class Scheduler(
         self.send_to_detokenizer.send_pyobj(recv_req)
         return None
 
+    def update_lora_registry(self, recv_req: UpdateLoraRegistryReq):
+        """Update the LoRA adapter registry and forward to detokenizer."""
+        try:
+            self.lora_registry = recv_req.update_registry_dict
+        except Exception as e:
+            logger.error(f"Failed to update LoRA registry: {e}")
+        
+    def prefetch_lora_timesteps(self, lora_name: Optional[str], priority: int = 0, step_lora_names: List[int] = []) -> bool:
+        """Prefetch LoRA adapter weights for the next few time steps."""
+        # remember to call update_lora_priority before this
+        if not self.lora_registry or lora_name is None:
+            return
+        lora_id = self.lora_registry.get(lora_name, None)
+        step_lora_ids = [self.lora_registry.get(name, None) for name in step_lora_names if name in self.lora_registry]
+        return self.lora_manager.prefetch_lora_weights(priority=priority, lora_id=lora_id, step_lora_ids=step_lora_ids)
 
 class IdleSleeper:
     """

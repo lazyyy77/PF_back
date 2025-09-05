@@ -17,7 +17,7 @@
 
 import logging
 from typing import Dict, Iterable, List, Optional, Set, Tuple
-
+import time
 import torch
 
 from sglang.srt.configs.load_config import LoadConfig
@@ -231,6 +231,20 @@ class LoRAManager:
 
         return required_slots <= mem_pool_vacancy
 
+    def prefetch_lora_weights(self, priority: int = 0, lora_id: str = None, step_lora_ids: List[str] = []) -> bool:
+        """
+        Prefetch LoRA weights from CPU to GPU memory for the given LoRA name.
+        """
+        success = self.memory_pool.prefetch_lora_weights(
+            lora_id=lora_id,
+            priority=priority,
+            step_lora_ids=step_lora_ids,
+            lora_adapters=self.loras,
+            lora_modules=self.lora_modules,
+            lora_refs=self.lora_refs.copy(),  # copy snapshot of current lora_refs to avoid mutation during the prefetch.
+        )
+        return success
+        
     def prepare_lora_batch(self, forward_batch: ForwardBatch):
 
         # Load active loras into lora memory pool
@@ -256,6 +270,7 @@ class LoRAManager:
             Transfer adapter metadata (weight indices, LoRA rank, scalings) from host
             to device (CUDA) asynchronously.
             """
+            t1 = time.perf_counter()
             weight_indices = [0] * len(forward_batch.lora_ids)
             lora_ranks = [0] * self.max_loras_per_batch
             scalings = [0] * self.max_loras_per_batch
@@ -285,6 +300,7 @@ class LoRAManager:
             scalings_out[: self.max_loras_per_batch].copy_(
                 scalings_tensor, non_blocking=True
             )
+            logger.warning(f"Transfer adapter info takes {time.perf_counter()-t1:.6f} seconds")
 
         if (
             hasattr(self, "max_bs_in_cuda_graph")

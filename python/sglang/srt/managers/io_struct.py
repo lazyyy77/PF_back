@@ -1208,3 +1208,10 @@ class BlockReqType(Enum):
 @dataclass
 class BlockReqInput:
     type: BlockReqType
+
+
+@dataclass
+class UpdateLoraRegistryReq:
+    # The update dictionary for LoRA registry
+    update_registry_dict: Dict[str, Any]
+    update_counter_dict: Dict[str, int]

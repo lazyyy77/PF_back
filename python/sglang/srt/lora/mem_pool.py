@@ -1,7 +1,9 @@
 import logging
 from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple, Union
-
+import time
 import torch
+import threading
+from queue import Empty, Full, PriorityQueue, Queue
 
 from sglang.srt.distributed import divide
 from sglang.srt.hf_transformers_utils import AutoConfig
@@ -19,7 +21,6 @@ from sglang.srt.lora.utils import (
 )
 
 logger = logging.getLogger(__name__)
-
 
 class EmptySlot:
     """
@@ -39,6 +40,36 @@ class EmptySlot:
 
 
 EMPTY_SLOT = EmptySlot()
+
+class BufferSlot:
+    
+    READY = 0
+    LOADING = 1
+    
+    def __init__(self, uid: Union[str, None, EmptySlot], priority: Optional[int] = 0):
+        self.uid = uid
+        self.priority = priority
+        self.status = self.READY
+
+
+class LoRAOperation:
+
+    counter = 0
+
+    def __init__(
+        self,
+        uid: Optional[str],
+        buffer_id: int,
+        lora_adapter: Optional[LoRAAdapter],
+        lora_modules: List[Dict[str, BaseLayerWithLoRA]],
+        priority: Optional[int] = None,
+    ):
+
+        self.uid = uid
+        self.buffer_id = buffer_id
+        self.lora_adapter = lora_adapter
+        self.lora_modules = lora_modules
+        self.priority = priority
 
 
 class LoRAMemoryPool:
@@ -78,11 +109,21 @@ class LoRAMemoryPool:
         # Buffer idx -> lora uid in memory pool
         # All uids are initialized as `EmptySlot` for empty buffer slots
         # Here we don't initialize to None since None is a valid uid
-        self.buffer_id_to_uid: List[Union[str, None, EmptySlot]] = [
-            EMPTY_SLOT
-        ] * self.max_loras_per_batch
+        # self.buffer_id_to_uid: List[Union[str, None, EmptySlot]] = [
+        #     EMPTY_SLOT
+        # ] * self.max_loras_per_batch
+        self.buffer_id_to_uid: Dict[int, BufferSlot] = {
+            i: BufferSlot(uid=EMPTY_SLOT, priority=1000) for i in range(self.max_loras_per_batch)
+        }
+
 
         self.init_buffers(base_model)
+        
+        self.load_lora_thread = threading.Thread(target=self.load_lora_cpu_to_gpu, daemon=True)
+        self.load_lora_thread.start()
+        self.load_lora_stream = torch.cuda.Stream()
+        self.stop_lora_event = threading.Event()
+        self.load_lora_queue = Queue()
 
     def can_support(self, config: Union[LoRAConfig, Iterable[LoRAConfig]]) -> bool:
         """
@@ -167,6 +208,61 @@ class LoRAMemoryPool:
             self.get_lora_B_shape,
         )
 
+    def prefetch_lora_weights(
+        self,
+        lora_id: str,
+        priority: int,
+        step_lora_ids: List[str],
+        lora_adapters: Dict[str, LoRAAdapter],
+        lora_modules: List[Dict[str, BaseLayerWithLoRA]],
+        lora_refs: Dict[str, LoRARef],
+    ) -> bool:
+        def get_available_buffer_slot():
+            for buffer_id in range(self.max_loras_per_batch):
+                # Prioritize empty slots
+                if self.buffer_id_to_uid[buffer_id].uid == EMPTY_SLOT:
+                    return buffer_id
+            logger.critical("[SYP][lora][prefetch]  no enough slot for lora, need to evict")
+            for buffer_id in range(0, self.max_loras_per_batch):
+                slot = self.buffer_id_to_uid[buffer_id]
+                if priority is not None and priority > slot.priority:
+                    continue
+                
+                if slot.uid not in step_lora_ids:
+                    if slot.uid is not None:
+                        lora_ref = lora_refs.get(slot.uid)
+                        if lora_ref is not None and lora_ref.pinned:
+                            continue
+                    self.uid_to_buffer_id.pop(slot.uid)
+                    logger.critical(f"Evicting LoRA {slot.uid} from buffer slot {buffer_id}.")
+                    self.buffer_id_to_uid[buffer_id].uid = EMPTY_SLOT
+                    return buffer_id
+            return -1
+
+        if lora_id not in self.uid_to_buffer_id:
+            buffer_id = get_available_buffer_slot()
+            if buffer_id == -1:
+                logger.critical(f"[SYP][lora][prefetch]  no available slot for prefetching LoRA {lora_id} now.")
+                return False
+            logger.critical(f"[SYP][lora][prefetch]  try prefetching LoRA {lora_id} to slot {buffer_id}")
+            lora_adapter = lora_adapters.get(lora_id, None)
+            operation = LoRAOperation(uid=lora_id, buffer_id=buffer_id, lora_adapter=lora_adapter, lora_modules=lora_modules, priority=priority)
+            try:
+                self.load_lora_queue.put(operation, block=False)
+                self.uid_to_buffer_id[lora_id] = buffer_id
+                self.buffer_id_to_uid[buffer_id].uid = lora_id
+                self.buffer_id_to_uid[buffer_id].priority = priority
+                self.buffer_id_to_uid[buffer_id].status = BufferSlot.LOADING
+                logger.critical(f"\033[91m [SYP][lora][prefetch]  Prefetched LoRA {lora_id} to slot {buffer_id}\033[0m")
+            except Full:
+                logger.critical(f"[SYP][lora][prefetch]  Load queue is full, cannot prefetch LoRA {lora_id} now.")
+                return False
+        else:
+            buffer_id = self.uid_to_buffer_id[lora_id]
+            self.buffer_id_to_uid[buffer_id].priority = priority
+        
+        return True
+
     def prepare_lora_batch(
         self,
         cur_uids: Set[Optional[str]],
@@ -177,11 +273,11 @@ class LoRAMemoryPool:
         def get_available_buffer_slot():
             for buffer_id in range(self.max_loras_per_batch):
                 # Prioritize empty slots
-                if self.buffer_id_to_uid[buffer_id] == EMPTY_SLOT:
+                if self.buffer_id_to_uid[buffer_id].uid == EMPTY_SLOT:
                     return buffer_id
-
-            for buffer_id in range(self.max_loras_per_batch):
-                uid = self.buffer_id_to_uid[buffer_id]
+            logger.critical("[SYP][lora]  no enough slot for lora, need to evict")
+            for buffer_id in range(0, self.max_loras_per_batch):
+                uid = self.buffer_id_to_uid[buffer_id].uid
 
                 # Evict unneeded lora
                 if uid not in cur_uids:
@@ -193,8 +289,8 @@ class LoRAMemoryPool:
                             continue
 
                     self.uid_to_buffer_id.pop(uid)
-                    logger.debug(f"Evicting LoRA {uid} from buffer slot {buffer_id}.")
-                    self.buffer_id_to_uid[buffer_id] = EMPTY_SLOT
+                    logger.critical(f"Evicting LoRA {uid} from buffer slot {buffer_id}.")
+                    self.buffer_id_to_uid[buffer_id].uid = EMPTY_SLOT
                     return buffer_id
 
             raise ValueError(
@@ -204,12 +300,25 @@ class LoRAMemoryPool:
         for uid in cur_uids:
             if uid not in self.uid_to_buffer_id:
                 buffer_id = get_available_buffer_slot()
+                logger.critical(f"[SYP][lora]  Assigning LoRA {uid} to slot {buffer_id}")
                 lora_adapter = lora_adapters.get(uid, None)
+                t1 = time.perf_counter()
                 self.load_lora_weight_to_buffer(
                     uid, buffer_id, lora_adapter, lora_modules
                 )
+                # operation = LoRAOperation(uid=uid, buffer_id=buffer_id, lora_adapter=lora_adapter, lora_modules=lora_modules)
+                # self.load_lora_queue.put(operation)
                 self.uid_to_buffer_id[uid] = buffer_id
-                self.buffer_id_to_uid[buffer_id] = uid
+                self.buffer_id_to_uid[buffer_id].uid = uid
+                t2 = time.perf_counter()
+                logger.critical(f"\033[91m [SYP][lora]  Loaded LoRA {uid} in {t2 - t1:.6f} seconds\033[0m")
+        while True:
+            for uid in cur_uids:
+                buffer_id = self.uid_to_buffer_id[uid]
+                if self.buffer_id_to_uid[buffer_id].status == BufferSlot.LOADING:
+                    time.sleep(0.001)
+                else:
+                    break
 
     def load_lora_weight_to_buffer(
         self,
@@ -293,3 +402,34 @@ class LoRAMemoryPool:
 
     def get_buffer_id(self, lora_uid: str):
         return self.uid_to_buffer_id[lora_uid]
+
+    def load_lora_cpu_to_gpu(self):
+        with self.load_lora_stream:
+            while not self.stop_lora_event.is_set():
+                try:
+                    operation = self.load_lora_queue.get(block=True, timeout=1)
+                except Empty:
+                    operation = None
+                
+                try:
+                    if operation is not None:
+                        self.load_lora_weight_to_buffer(
+                            operation.uid,
+                            operation.buffer_id,
+                            operation.lora_adapter,
+                            operation.lora_modules,
+                        )
+                        self.buffer_id_to_uid[operation.buffer_id].status = BufferSlot.READY
+                except Exception as e:
+                    print(f"[SYP][lora]  Error loading LoRA: {e}")
+                
+    def update_lora_priority(self):
+        for buffer_id in range(self.max_loras_per_batch):
+            slot = self.buffer_id_to_uid[buffer_id]
+            if slot.uid is EMPTY_SLOT:
+                slot.priority = 1000
+            if slot.uid is not EMPTY_SLOT and slot.status == BufferSlot.READY:
+                slot.priority -= 1
+                if slot.priority < 0:
+                    slot.priority = 1000
+            

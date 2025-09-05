@@ -109,6 +109,9 @@ class HiRadixCache(RadixCache):
             req_to_token_pool, token_to_kv_pool_allocator, page_size, disable=False
         )
 
+        logger.info(f"HiRadixCache initialized with write_policy = {hicache_write_policy}, write_through_threshold = {self.write_through_threshold}, "
+                    f"io_backend = {hicache_io_backend}, storage_backend = {hicache_storage_backend}, layout = {hicache_mem_layout}")
+
     def reset(self):
         TreeNode.counter = 0
         self.cache_controller.reset()

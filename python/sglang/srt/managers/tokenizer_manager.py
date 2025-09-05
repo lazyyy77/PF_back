@@ -113,6 +113,7 @@ from sglang.srt.managers.io_struct import (
     TokenizedGenerateReqInput,
     UnloadLoRAAdapterReqInput,
     UnloadLoRAAdapterReqOutput,
+    UpdateLoraRegistryReq,
     UpdateWeightFromDiskReqInput,
     UpdateWeightFromDiskReqOutput,
     UpdateWeightsFromDistributedReqInput,
@@ -277,6 +278,10 @@ class TokenizerManager:
             self.send_to_scheduler = get_zmq_socket(
                 context, zmq.PUSH, port_args.scheduler_input_ipc_name, True
             )
+            
+        self.send_to_scheduler_control = get_zmq_socket(
+            context, zmq.PUSH, port_args.scheduler_control_ipc_name, True
+        )
 
         # Request states
         self.no_create_loop = False
@@ -313,7 +318,7 @@ class TokenizerManager:
         # The registry dynamically updates as adapters are loaded / unloaded during runtime. It
         # serves as the source of truth for available adapters and maps user-friendly LoRA names
         # to internally used unique LoRA IDs.
-        self.lora_registry = LoRARegistry(self.server_args.lora_paths)
+        self.lora_registry = LoRARegistry(self.server_args.lora_paths, update_callback=self.update_lora_registry)
         # Lock to serialize LoRA update operations.
         # Please note that, unlike `model_update_lock`, this does not block inference, allowing
         # LoRA updates and inference to overlap.
@@ -468,6 +473,9 @@ class TokenizerManager:
             ]
         )
 
+        # update_dict = self.lora_registry._get_update_dict()
+        # self.update_lora_registry(update_dict)
+
     def init_disaggregation(self):
         self.disaggregation_mode = DisaggregationMode(
             self.server_args.disaggregation_mode
@@ -530,6 +538,8 @@ class TokenizerManager:
             if self.server_args.enable_lora and obj.lora_path:
                 # Look up the LoRA ID from the registry and start tracking ongoing LoRA requests.
                 obj.lora_id = await self.lora_registry.acquire(obj.lora_path)
+                print(f"[SYP][lora] Acquired LoRA ID {obj.lora_id} for path {obj.lora_path}")
+                print(f"[SYP][lora] Current LoRA registry: {self.lora_registry._registry}")
 
             if obj.is_single:
                 tokenized_obj = await self._tokenize_one_request(obj)
@@ -1242,6 +1252,9 @@ class TokenizerManager:
                 # Register the LoRA adapter only after loading is successful.
                 if result.success:
                     await self.lora_registry.register(new_adapter)
+
+                # update_dict = self.lora_registry._get_update_dict()
+                # self.update_lora_registry(update_dict)
 
                 return result
         except ValueError as e:
@@ -2088,6 +2101,10 @@ class TokenizerManager:
 
         return scores
 
+    def update_lora_registry(self, update_registry_dict: Dict[str, str]):
+        """Update LoRA registry by sending a message to the scheduler control channel."""
+        req = UpdateLoraRegistryReq(update_registry_dict=update_registry_dict, update_counter_dict={})
+        self.send_to_scheduler_control.send_pyobj(req)
 
 class ServerStatus(Enum):
     Up = "Up"
