@@ -824,9 +824,11 @@ async def slow_down(obj: SlowDownReqInput, request: Request):
 @app.api_route("/load_lora_adapter", methods=["POST"])
 async def load_lora_adapter(obj: LoadLoRAAdapterReqInput, request: Request):
     """Load a new LoRA adapter without re-launching the server."""
+    t1 = time.perf_counter()
     result = await _global_state.tokenizer_manager.load_lora_adapter(obj, request)
 
     if result.success:
+        print(f"\033[92m [SYP][lora]  Loaded LoRA adapter in {time.perf_counter() - t1:.6f} seconds\033[0m")
         return ORJSONResponse(
             result,
             status_code=HTTPStatus.OK,

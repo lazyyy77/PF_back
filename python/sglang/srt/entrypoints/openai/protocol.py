@@ -450,6 +450,8 @@ class ChatCompletionRequest(BaseModel):
         "Currently only supported for OpenAI models.",
     )
 
+    lora_path: Optional[Union[List[Optional[str]], Optional[str]]] = None
+
     @model_validator(mode="before")
     @classmethod
     def set_tool_choice_default(cls, values):
