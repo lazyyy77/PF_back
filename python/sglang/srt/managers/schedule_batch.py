@@ -434,6 +434,7 @@ class Req:
         bootstrap_room: Optional[int] = None,
         data_parallel_rank: Optional[int] = None,
         vocab_size: Optional[int] = None,
+        agent_id: Optional[str] = None,
     ):
         # Input and output info
         self.rid = rid
@@ -615,6 +616,10 @@ class Req:
         self.tmp_end_idx: int = -1
         self.metadata_buffer_index: int = -1
 
+        # For PFEnging
+        self.agent_id = agent_id
+        
+        
     @property
     def seqlen(self):
         return len(self.origin_input_ids) + len(self.output_ids)
