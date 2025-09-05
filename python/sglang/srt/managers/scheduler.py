@@ -101,6 +101,7 @@ from sglang.srt.managers.io_struct import (
     TokenizedGenerateReqInput,
     UnloadLoRAAdapterReqInput,
     UnloadLoRAAdapterReqOutput,
+    UpdateAgentTimestepReq,
     UpdateLoraRegistryReq,
     UpdateWeightFromDiskReqInput,
     UpdateWeightsFromDistributedReqInput,
@@ -132,6 +133,7 @@ from sglang.srt.managers.scheduler_recv_skipper import SchedulerRecvSkipper
 from sglang.srt.managers.scheduler_update_weights_mixin import (
     SchedulerUpdateWeightsMixin,
 )
+from sglang.srt.managers.agent_manager import AgentManager
 from sglang.srt.managers.session_controller import Session
 from sglang.srt.managers.tp_worker import TpModelWorker
 from sglang.srt.managers.tp_worker_overlap_thread import TpModelWorkerClient
@@ -262,6 +264,14 @@ class Scheduler(
         # Init model config
         self.model_config = ModelConfig.from_server_args(server_args)
 
+        # For PFEngine
+        self.agent_manager = AgentManager(self.server_args.evict_pri_level, self.server_args.load_ahead_step)
+        self.last_update_time = time.time()
+        self.last_batch_start_time = time.time()
+        self.last_batch_end_time = time.time()
+        self.last_batch_id = 0
+
+
         # Init inter-process communication
         context = zmq.Context(2)
         self.idle_sleeper = None
@@ -275,7 +285,9 @@ class Scheduler(
             self.recv_from_rpc = get_zmq_socket(
                 context, zmq.DEALER, port_args.rpc_ipc_name, False
             )
-
+            self.recv_from_tokenizer_control = get_zmq_socket(
+                context, zmq.PULL, port_args.scheduler_control_ipc_name, False
+            )
             self.send_to_tokenizer = get_zmq_socket(
                 context, zmq.PUSH, port_args.tokenizer_ipc_name, False
             )
@@ -555,6 +567,7 @@ class Scheduler(
                 (LoadLoRAAdapterReqInput, self.load_lora_adapter),
                 (UnloadLoRAAdapterReqInput, self.unload_lora_adapter),
                 (MultiTokenizerRegisterReq, self.register_multi_tokenizer),
+                (UpdateAgentTimestepReq, self.update_agent_timestep),
                 (UpdateLoraRegistryReq, self.update_lora_registry),
             ]
         )
@@ -1239,6 +1252,7 @@ class Scheduler(
                 bootstrap_room=recv_req.bootstrap_room,
                 data_parallel_rank=recv_req.data_parallel_rank,
                 vocab_size=self.model_config.vocab_size,
+                agent_id=recv_req.agent_id,
             )
             req.tokenizer = self.tokenizer
 
@@ -2629,6 +2643,22 @@ class Scheduler(
         freeze_gc("Scheduler")
         self.send_to_detokenizer.send_pyobj(recv_req)
         return None
+
+    def update_agent_timestep(self, recv_req):
+        """Handle agent priority update request"""
+        if hasattr(self, 'agent_manager') and self.agent_manager is not None:
+            try:
+                self.agent_manager.update_agent_timestep(recv_req.update_dict)
+                last_update_time = self.last_update_time
+                self.last_update_time = time.time()
+                lasting_time = self.last_update_time - last_update_time
+                logger.info(f"\033[94mUPDATE\033[0m:   [{lasting_time:.3f}s] Updated agent timesteps: {recv_req.update_dict}")
+            except Exception as e:
+                logger.error(f"Failed to update agent timesteps: {e}")
+        else:
+            logger.warning("AgentManager not available, ignoring timestep update request")
+
+
 
     def update_lora_registry(self, recv_req: UpdateLoraRegistryReq):
         """Update the LoRA adapter registry and forward to detokenizer."""

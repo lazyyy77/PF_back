@@ -104,6 +104,7 @@ from sglang.srt.managers.io_struct import (
     ReleaseMemoryOccupationReqOutput,
     ResumeMemoryOccupationReqInput,
     ResumeMemoryOccupationReqOutput,
+    SelfDebugReq,
     SessionParams,
     SetInternalStateReq,
     SetInternalStateReqOutput,
@@ -113,6 +114,7 @@ from sglang.srt.managers.io_struct import (
     TokenizedGenerateReqInput,
     UnloadLoRAAdapterReqInput,
     UnloadLoRAAdapterReqOutput,
+    UpdateAgentTimestepReq,
     UpdateLoraRegistryReq,
     UpdateWeightFromDiskReqInput,
     UpdateWeightFromDiskReqOutput,
@@ -741,6 +743,7 @@ class TokenizerManager:
                 custom_logit_processor=obj.custom_logit_processor,
                 return_hidden_states=obj.return_hidden_states,
                 data_parallel_rank=obj.data_parallel_rank,
+                agent_id=obj.agent_id,
             )
         elif isinstance(obj, EmbeddingReqInput):
             tokenized_obj = TokenizedEmbeddingReqInput(
@@ -2100,6 +2103,16 @@ class TokenizerManager:
             scores.append(score_list)
 
         return scores
+
+    def update_agent_timestep(self, agent_data: Dict[str, Any], timestep_data: Dict[int, List[str]], timestep_cnt: int):
+        """Update agent priorities by sending a message to the scheduler control channel."""
+        req = UpdateAgentTimestepReq(agent_data, timestep_data, timestep_cnt)
+        self.send_to_scheduler_control.send_pyobj(req)
+
+    def self_debug_request(self, prompt: list[int], agent_id: str):
+        """Send a self-debug request to the tokenizer manager."""
+        req = SelfDebugReq(prompt, agent_id)
+        self.send_to_scheduler.send_pyobj(req)
 
     def update_lora_registry(self, update_registry_dict: Dict[str, str]):
         """Update LoRA registry by sending a message to the scheduler control channel."""
