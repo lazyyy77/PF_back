@@ -7,6 +7,7 @@ from typing import List, Optional
 
 import torch
 
+from sglang.srt.managers.agent_manager import AgentManager
 from sglang.srt.managers.cache_controller import HiCacheController, PrefetchOperation
 from sglang.srt.mem_cache.allocator import BaseTokenToKVPoolAllocator
 from sglang.srt.mem_cache.base_prefix_cache import MatchResult
@@ -27,6 +28,10 @@ logger = logging.getLogger(__name__)
 
 class LoRAHiRadixCache(LoRARadixCache):
 
+    REQ_IS_EVICTED = 0
+    REQ_IS_LOADING = 1
+    REQ_IS_READY = 2
+
     def __init__(
         self,
         req_to_token_pool: ReqToTokenPool,
@@ -42,6 +47,7 @@ class LoRAHiRadixCache(LoRARadixCache):
         hicache_storage_prefetch_policy: Optional[str] = "best_effort",
         model_name: Optional[str] = None,
         storage_backend_extra_config: Optional[str] = None,
+        agent_manager: Optional[AgentManager] = None,
     ):
 
         if hicache_io_backend == "direct":
@@ -79,6 +85,8 @@ class LoRAHiRadixCache(LoRARadixCache):
         self.prefetch_timeout = 3  # seconds
         self.prefetch_stop_policy = hicache_storage_prefetch_policy
 
+        self.agent_manager = agent_manager
+
         self.load_cache_event = threading.Event()
         self.cache_controller = HiCacheController(
             token_to_kv_pool_allocator,
@@ -107,7 +115,7 @@ class LoRAHiRadixCache(LoRARadixCache):
         )
         self.load_back_threshold = 10   # TODO change to 0
         super().__init__(
-            req_to_token_pool, token_to_kv_pool_allocator, page_size, disable=False
+            req_to_token_pool, token_to_kv_pool_allocator, page_size, disable=False, agent_manager=self.agent_manager
         )
 
     def reset(self):
@@ -133,6 +141,7 @@ class LoRAHiRadixCache(LoRARadixCache):
             return False
 
     def write_backup(self, node: LoRATreeNode, write_back=False):
+        logger.info(f"Write back node {node.id} to host, len {len(node.key)}")
         host_indices = self.cache_controller.write(
             device_indices=node.value,
             node_id=node.id,
@@ -297,7 +306,7 @@ class LoRAHiRadixCache(LoRARadixCache):
                 heapq.heappush(leaves, x.parent)
 
     def load_back(
-        self, node: LoRATreeNode, mem_quota: Optional[int] = None
+        self, node: LoRATreeNode, mem_quota: Optional[int] = None, priority: Optional[int] = None
     ) -> Optional[torch.Tensor]:
         # todo: more loading policies
 
@@ -803,3 +812,13 @@ class LoRAHiRadixCache(LoRARadixCache):
         last_host_node.release_host()
         self.cache_controller.append_host_mem_release(host_indices[:completed_tokens])
         self.cache_controller.prefetch_tokens_occupied -= len(token_ids)
+
+    def get_node_chain_status(self, req_last_node: LoRATreeNode):
+        n = req_last_node
+        while n != self.root_node:
+            if n.evicted:
+                return self.REQ_IS_EVICTED
+            if n.loading:
+                return self.REQ_IS_LOADING
+            n = n.parent
+        return self.REQ_IS_READY
