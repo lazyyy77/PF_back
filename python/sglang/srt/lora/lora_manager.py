@@ -300,7 +300,7 @@ class LoRAManager:
             scalings_out[: self.max_loras_per_batch].copy_(
                 scalings_tensor, non_blocking=True
             )
-            logger.warning(f"Transfer adapter info takes {time.perf_counter()-t1:.6f} seconds")
+            logger.debug(f"Transfer adapter info takes {time.perf_counter()-t1:.6f} seconds")
 
         if (
             hasattr(self, "max_bs_in_cuda_graph")
