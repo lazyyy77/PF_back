@@ -100,7 +100,11 @@ class TreeNode:
         self.agents: dict[str, AgentInfo] = {}
         self.cache = cache
         self.ignore_holding = ignore_holding
+        self.hold_priority = 0
 
+    @property
+    def _hold_priority(self):
+        return self.hold_priority
 
     @property
     def evicted(self):
@@ -129,6 +133,24 @@ class TreeNode:
 
     def __lt__(self, other: "TreeNode"):
         return self.last_access_time < other.last_access_time
+        if self.cache and self.cache.agent_manager:
+            self_agent_id, self_priority = self.cache.agent_manager.get_agents_hold_priority(list(self.agents.keys()))
+            other_agent_id, other_priority = other.cache.agent_manager.get_agents_hold_priority(list(other.agents.keys()))
+            # print(f"self_priority: {self_priority}, other_priority: {other_priority}")
+            if self_priority == other_priority or self_agent_id == -1 or other_agent_id == -1 or self.ignore_holding or other.ignore_holding:
+                return self.agents[self_agent_id].get_priority() < other.agents[other_agent_id].get_priority()
+            return self_priority < other_priority
+
+        # Fallback to original logic if agent_manager is not available
+        self_priority = max(
+            (agent_info.get_priority() for agent_info in self.agents.values()),
+            default=-1,
+        )
+        other_priority = max(
+            (agent_info.get_priority() for agent_info in other.agents.values()),
+            default=-1,
+        )
+        return self_priority < other_priority
 
 
 def _key_match_page_size1(key0: List, key1: List):

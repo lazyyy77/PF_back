@@ -10,6 +10,7 @@ import copy
 
 import torch
 
+from python.sglang.srt.mem_cache.lora_hiradix_cache import LoRAHiRadixCache
 from sglang.srt.disaggregation.kv_events import (
     AllBlocksCleared,
     BlockRemoved,
@@ -54,7 +55,7 @@ class LoRATreeNode:
 
     counter = 0
 
-    def __init__(self, id: Optional[int] = None, cache: Optional[LoRARadixCache] = None, ignore_holding: bool = True):
+    def __init__(self, id: Optional[int] = None, cache: Optional[LoRAHiRadixCache] = None, ignore_holding: bool = True):
         self.children = defaultdict(LoRATreeNode)
         self.parent: LoRATreeNode = None
         self.key: LoRAKey = None
@@ -82,7 +83,11 @@ class LoRATreeNode:
         self.agents: dict[str, AgentInfo] = {}
         self.cache = cache
         self.ignore_holding = ignore_holding
+        self.hold_priority = 0
 
+    @property
+    def _hold_priority(self):
+        return self.hold_priority
 
     @property
     def evicted(self):
@@ -111,6 +116,24 @@ class LoRATreeNode:
 
     def __lt__(self, other: "LoRATreeNode"):
         return self.last_access_time < other.last_access_time
+        if self.cache and self.cache.agent_manager:
+            self_agent_id, self_priority = self.cache.agent_manager.get_agents_hold_priority(list(self.agents.keys()))
+            other_agent_id, other_priority = other.cache.agent_manager.get_agents_hold_priority(list(other.agents.keys()))
+            # print(f"self_priority: {self_priority}, other_priority: {other_priority}")
+            if self_priority == other_priority or self_agent_id == -1 or other_agent_id == -1 or self.ignore_holding or other.ignore_holding:
+                return self.agents[self_agent_id].get_priority() < other.agents[other_agent_id].get_priority()
+            return self_priority < other_priority
+
+        # Fallback to original logic if agent_manager is not available
+        self_priority = max(
+            (agent_info.get_priority() for agent_info in self.agents.values()),
+            default=-1,
+        )
+        other_priority = max(
+            (agent_info.get_priority() for agent_info in other.agents.values()),
+            default=-1,
+        )
+        return self_priority < other_priority
 
 
 def _key_match(key0: LoRAKey, key1: LoRAKey):
