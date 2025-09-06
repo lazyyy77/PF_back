@@ -5,6 +5,8 @@ import time
 import logging
 from collections import defaultdict
 from typing import TYPE_CHECKING, Any, List, Optional
+import math
+import copy
 
 import torch
 
@@ -16,6 +18,8 @@ from sglang.srt.disaggregation.kv_events import (
 from sglang.srt.mem_cache.allocator import BaseTokenToKVPoolAllocator
 from sglang.srt.mem_cache.base_prefix_cache import BasePrefixCache, MatchResult
 from sglang.srt.mem_cache.memory_pool import ReqToTokenPool
+from sglang.srt.mem_cache.radix_cache import AgentInfo
+from sglang.srt.managers.agent_manager import AgentManager
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +54,7 @@ class LoRATreeNode:
 
     counter = 0
 
-    def __init__(self, id: Optional[int] = None):
+    def __init__(self, id: Optional[int] = None, cache: Optional[LoRARadixCache] = None, ignore_holding: bool = True):
         self.children = defaultdict(LoRATreeNode)
         self.parent: LoRATreeNode = None
         self.key: LoRAKey = None
@@ -71,6 +75,14 @@ class LoRATreeNode:
 
         self.id = LoRATreeNode.counter if id is None else id
         LoRATreeNode.counter += 1
+
+        # For PFEngine
+        # Each node's corresponding agents is represented as a str index dict: 
+        # (agent_id: str, priority: float, hit_cnt: int, last_call_time: int, continue_call: int)
+        self.agents: dict[str, AgentInfo] = {}
+        self.cache = cache
+        self.ignore_holding = ignore_holding
+
 
     @property
     def evicted(self):
@@ -121,7 +133,8 @@ class LoRARadixCache(BasePrefixCache):
         token_to_kv_pool_allocator: BaseTokenToKVPoolAllocator,
         page_size: int,
         disable: bool = False,
-        enable_kv_cache_events: bool = False
+        enable_kv_cache_events: bool = False,
+        agent_manager: Optional[AgentManager] = None,
     ):
         if page_size > 1:
             raise ValueError("LoRARadixCache currently only supports page_size = 1")
@@ -137,6 +150,7 @@ class LoRARadixCache(BasePrefixCache):
         self.disable = disable
         self.enable_kv_cache_events = enable_kv_cache_events
         self.kv_event_queue = []
+        self.agent_manager = agent_manager
 
         if self.token_to_kv_pool_allocator:
             self.device = self.token_to_kv_pool_allocator.device
@@ -149,7 +163,7 @@ class LoRARadixCache(BasePrefixCache):
         logger.info(f"LoRARadixCache initialized with page_size = {self.page_size}, disable = {self.disable}, enable_kv_cache_events = {self.enable_kv_cache_events}")
 
     def reset(self):
-        self.root_node = LoRATreeNode()
+        self.root_node = LoRATreeNode(cache=self)
         self.root_node.key = LoRAKey(lora_id="", token_ids=[])
         self.root_node.value = []
         self.root_node.host_value = []
@@ -306,7 +320,7 @@ class LoRARadixCache(BasePrefixCache):
 
         delta = 0
         while node != self.root_node:
-            if node.lock_ref == 0:
+            if node.lock_ref == 0 and node.value is not None:
                 self.evictable_size_ -= len(node.value)
                 self.protected_size_ += len(node.value)
                 delta -= len(node.value)
@@ -320,7 +334,7 @@ class LoRARadixCache(BasePrefixCache):
 
         delta = 0
         while node != self.root_node:
-            if node.lock_ref == 1:
+            if node.lock_ref == 1 and node.value is not None:
                 self.evictable_size_ += len(node.value)
                 self.protected_size_ -= len(node.value)
                 delta += len(node.value)
@@ -376,7 +390,7 @@ class LoRARadixCache(BasePrefixCache):
     def _split_node(self, key: LoRAKey, child: LoRATreeNode, split_len: int):
         # new_node -> child
         self._record_remove_event(child)
-        new_node = LoRATreeNode()
+        new_node = LoRATreeNode(cache=self)
         key_split_1 = LoRAKey(lora_id=key.lora_id, token_ids=key.token_ids[:split_len])
         key_split_2 = LoRAKey(lora_id=key.lora_id, token_ids=key.token_ids[split_len:])
         new_node.children = {self.get_child_key_fn(key_split_2): child}
@@ -384,6 +398,7 @@ class LoRARadixCache(BasePrefixCache):
         new_node.lock_ref = child.lock_ref
         new_node.key = key_split_1
         new_node.value = child.value[:split_len]
+        new_node.agents = copy.deepcopy(child.agents)
         child.parent = new_node
         child.key = key_split_2
         child.value = child.value[split_len:]
@@ -418,12 +433,13 @@ class LoRARadixCache(BasePrefixCache):
                 child_key = self.get_child_key_fn(key)
 
         if len(key):
-            new_node = LoRATreeNode()
+            new_node = LoRATreeNode(cache=self)
             new_node.parent = node
             new_node.key = key
             new_node.value = value
             node.children[child_key] = new_node
             self.evictable_size_ += len(value)
+            new_node.agents = copy.deepcopy(node.agents)
             self._record_store_event(new_node)
         
         assert len(node.key) == len(node.value)
@@ -434,11 +450,19 @@ class LoRARadixCache(BasePrefixCache):
         stack = [(node, indent)]
         while stack:
             current_node, current_indent = stack.pop()
+            # 构造agents字符串
+            if current_node.agents:
+                agents_str = '{' + ', '.join(f'({k}:{v.hit_cnt})' for k, v in current_node.agents.items()) + '}'
+            else:
+                agents_str = '{}'
             print(
                 " " * current_indent,
-                len(current_node.key),
-                current_node.key.token_ids[:10],
+                "|",
+                current_node.key[:10],
+                current_node.id,
+                # len(current_node.key),
                 f"r={current_node.lock_ref}",
+                agents_str
             )
             for key, child in current_node.children.items():
                 stack.append((child, current_indent + 2))
@@ -536,3 +560,50 @@ class LoRARadixCache(BasePrefixCache):
         self.kv_event_queue = []
         return events
 
+    def _update_agent_to_last_nodes(self, req: Req, last_node: LoRATreeNode):
+        agent_id = req.agent_id
+        
+        if agent_id not in self.agent_manager.agent_to_last_nodes:
+            self.agent_manager.agent_to_last_nodes[agent_id] = set()
+            
+        current_last_nodes = self.agent_manager.agent_to_last_nodes[agent_id]
+        n = last_node
+        if(n == self.root_node):
+            print("damn here's the bug")
+        while n != self.root_node:
+            if n in current_last_nodes and n != last_node:
+                current_last_nodes.remove(n)
+                break
+            n = n.parent
+        should_add = True
+        for n in current_last_nodes:
+            while n != self.root_node:
+                if n == last_node:
+                    should_add = False
+                    break
+                n = n.parent
+            if not should_add:
+                break
+        if should_add:
+            current_last_nodes.add(last_node)
+
+    def _update_leaf_node_priority(self, req: Req, last_node: LoRATreeNode):
+        agent_id = req.agent_id
+        self._update_agent_to_last_nodes(req, last_node)
+        n = last_node
+        if agent_id not in n.agents:
+            n.agents[agent_id] = AgentInfo(
+                agent_id=agent_id,
+                priority=0.0,
+                hit_cnt=0,
+                last_call_time=time.time(),
+                continue_call=0
+            )
+        n.agents[agent_id].hit_cnt += 1
+        if self.agent_manager.agent_last_node_id == n.id:
+            n.agents[agent_id].continue_call += 1
+        else:
+            n.agents[agent_id].continue_call = 1
+        self.agent_manager.agent_last_node_id = n.id
+        n.agents[agent_id].last_call_time = time.time()
+        n.agents[agent_id].update_priority()

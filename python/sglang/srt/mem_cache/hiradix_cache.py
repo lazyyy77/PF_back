@@ -27,6 +27,10 @@ logger = logging.getLogger(__name__)
 
 class HiRadixCache(RadixCache):
 
+    REQ_IS_EVICTED = 0
+    REQ_IS_LOADING = 1
+    REQ_IS_READY = 2
+
     def __init__(
         self,
         req_to_token_pool: ReqToTokenPool,
@@ -110,7 +114,7 @@ class HiRadixCache(RadixCache):
         )
         self.load_back_threshold = 10
         super().__init__(
-            req_to_token_pool, token_to_kv_pool_allocator, page_size, disable=False
+            req_to_token_pool, token_to_kv_pool_allocator, page_size, disable=False, agent_manager=self.agent_manager
         )
 
     def reset(self):
@@ -136,6 +140,7 @@ class HiRadixCache(RadixCache):
             return False
 
     def write_backup(self, node: TreeNode, write_back=False):
+        logger.info(f"Write back node {node.id} to host, len {len(node.key)}")
         host_indices = self.cache_controller.write(
             device_indices=node.value,
             node_id=node.id,
@@ -299,7 +304,7 @@ class HiRadixCache(RadixCache):
                 heapq.heappush(leaves, x.parent)
 
     def load_back(
-        self, node: TreeNode, mem_quota: Optional[int] = None
+        self, node: TreeNode, mem_quota: Optional[int] = None, priority: Optional[int] = None
     ) -> Optional[torch.Tensor]:
         # todo: more loading policies
 
@@ -791,3 +796,13 @@ class HiRadixCache(RadixCache):
         last_host_node.release_host()
         self.cache_controller.append_host_mem_release(host_indices[:completed_tokens])
         self.cache_controller.prefetch_tokens_occupied -= len(token_ids)
+
+    def get_node_chain_status(self, req_last_node: TreeNode):
+        n = req_last_node
+        while n != self.root_node:
+            if n.evicted:
+                return self.REQ_IS_EVICTED
+            if n.loading:
+                return self.REQ_IS_LOADING
+            n = n.parent
+        return self.REQ_IS_READY

@@ -25,6 +25,7 @@ from collections import defaultdict
 from functools import partial
 from typing import TYPE_CHECKING, List, Optional
 import math
+import copy
 
 import torch
 
@@ -56,7 +57,7 @@ class AgentInfo:
 
     def update_priority_locality(self):
         """Calculate the priority of the agent based on its locality."""
-        decay = 1 / (1 + math.exp( -0.1 * (self.last_call_time - 1)))
+        decay = 1 / (1 + math.exp( -0.1 * (self.last_call_time - 1))) # TODO: wrong function, inverse
         self.inner_priority = self.hit_cnt * decay + self.continue_call
         return self.inner_priority
 
@@ -71,7 +72,7 @@ class TreeNode:
 
     counter = 0
 
-    def __init__(self, id: Optional[int] = None, cache: Optional[RadixCache] = None):
+    def __init__(self, id: Optional[int] = None, cache: Optional[RadixCache] = None, ignore_holding: bool = True):
         self.children = defaultdict(TreeNode)
         self.parent: TreeNode = None
         self.key: List[int] = None
@@ -98,6 +99,7 @@ class TreeNode:
         # (agent_id: str, priority: float, hit_cnt: int, last_call_time: int, continue_call: int)
         self.agents: dict[str, AgentInfo] = {}
         self.cache = cache
+        self.ignore_holding = ignore_holding
 
 
     @property
@@ -360,7 +362,7 @@ class RadixCache(BasePrefixCache):
 
         delta = 0
         while node != self.root_node:
-            if node.lock_ref == 0:
+            if node.lock_ref == 0 and node.value is not None:
                 self.evictable_size_ -= len(node.value)
                 self.protected_size_ += len(node.value)
                 delta -= len(node.value)
@@ -374,7 +376,7 @@ class RadixCache(BasePrefixCache):
 
         delta = 0
         while node != self.root_node:
-            if node.lock_ref == 1:
+            if node.lock_ref == 1 and node.value is not None:
                 self.evictable_size_ += len(node.value)
                 self.protected_size_ -= len(node.value)
                 delta += len(node.value)
@@ -436,6 +438,7 @@ class RadixCache(BasePrefixCache):
         new_node.lock_ref = child.lock_ref
         new_node.key = child.key[:split_len]
         new_node.value = child.value[:split_len]
+        new_node.agents = copy.deepcopy(child.agents)
         child.parent = new_node
         child.key = child.key[split_len:]
         child.value = child.value[split_len:]
@@ -476,6 +479,7 @@ class RadixCache(BasePrefixCache):
             new_node.value = value
             node.children[child_key] = new_node
             self.evictable_size_ += len(value)
+            new_node.agents = copy.deepcopy(node.agents)
             self._record_store_event(new_node)
         return total_prefix_length
 
@@ -484,11 +488,19 @@ class RadixCache(BasePrefixCache):
         stack = [(node, indent)]
         while stack:
             current_node, current_indent = stack.pop()
+            # 构造agents字符串
+            if current_node.agents:
+                agents_str = '{' + ', '.join(f'({k}:{v.hit_cnt})' for k, v in current_node.agents.items()) + '}'
+            else:
+                agents_str = '{}'
             print(
                 " " * current_indent,
-                len(current_node.key),
+                "|",
                 current_node.key[:10],
+                current_node.id,
+                # len(current_node.key),
                 f"r={current_node.lock_ref}",
+                agents_str
             )
             for key, child in current_node.children.items():
                 stack.append((child, current_indent + 2))
@@ -496,7 +508,7 @@ class RadixCache(BasePrefixCache):
                 assert key == self.get_child_key_fn(
                     child.key
                 ), f"{key=}, {self.get_child_key_fn(child.key)=}"
-
+                
     def _delete_leaf(self, node):
         for k, v in node.parent.children.items():
             if v == node:
@@ -588,6 +600,53 @@ class RadixCache(BasePrefixCache):
         self.kv_event_queue = []
         return events
 
+    def _update_agent_to_last_nodes(self, req: Req, last_node: TreeNode):
+        agent_id = req.agent_id
+        
+        if agent_id not in self.agent_manager.agent_to_last_nodes:
+            self.agent_manager.agent_to_last_nodes[agent_id] = set()
+            
+        current_last_nodes = self.agent_manager.agent_to_last_nodes[agent_id]
+        n = last_node
+        if(n == self.root_node):
+            print("damn here's the bug")
+        while n != self.root_node:
+            if n in current_last_nodes and n != last_node:
+                current_last_nodes.remove(n)
+                break
+            n = n.parent
+        should_add = True
+        for n in current_last_nodes:
+            while n != self.root_node:
+                if n == last_node:
+                    should_add = False
+                    break
+                n = n.parent
+            if not should_add:
+                break
+        if should_add:
+            current_last_nodes.add(last_node)
+
+    def _update_leaf_node_priority(self, req: Req, last_node: TreeNode):
+        agent_id = req.agent_id
+        self._update_agent_to_last_nodes(req, last_node)
+        n = last_node
+        if agent_id not in n.agents:
+            n.agents[agent_id] = AgentInfo(
+                agent_id=agent_id,
+                priority=0.0,
+                hit_cnt=0,
+                last_call_time=time.time(),
+                continue_call=0
+            )
+        n.agents[agent_id].hit_cnt += 1
+        if self.agent_manager.agent_last_node_id == n.id:
+            n.agents[agent_id].continue_call += 1
+        else:
+            n.agents[agent_id].continue_call = 1
+        self.agent_manager.agent_last_node_id = n.id
+        n.agents[agent_id].last_call_time = time.time()
+        n.agents[agent_id].update_priority()
 
 if __name__ == "__main__":
     tree = RadixCache(None, None, page_size=1, disable=False)
