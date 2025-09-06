@@ -540,8 +540,8 @@ class TokenizerManager:
             if self.server_args.enable_lora and obj.lora_path:
                 # Look up the LoRA ID from the registry and start tracking ongoing LoRA requests.
                 obj.lora_id = await self.lora_registry.acquire(obj.lora_path)
-                print(f"[SYP][lora] Acquired LoRA ID {obj.lora_id} for path {obj.lora_path}")
-                print(f"[SYP][lora] Current LoRA registry: {self.lora_registry._registry}")
+                logger.debug(f"[SYP][lora] Acquired LoRA ID {obj.lora_id} for path {obj.lora_path}")
+                logger.debug(f"[SYP][lora] Current LoRA registry: {self.lora_registry._registry}")
 
             if obj.is_single:
                 tokenized_obj = await self._tokenize_one_request(obj)

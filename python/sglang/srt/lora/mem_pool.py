@@ -45,11 +45,12 @@ class BufferSlot:
     
     READY = 0
     LOADING = 1
-    
-    def __init__(self, uid: Union[str, None, EmptySlot], priority: Optional[int] = 0):
+
+    def __init__(self, uid: Union[str, None, EmptySlot], priority: Optional[int] = 0, status: int = READY, pinned: bool = False):
         self.uid = uid
         self.priority = priority
-        self.status = self.READY
+        self.status = status
+        self.pinned = pinned
 
 
 class LoRAOperation:
@@ -113,17 +114,19 @@ class LoRAMemoryPool:
         #     EMPTY_SLOT
         # ] * self.max_loras_per_batch
         self.buffer_id_to_uid: Dict[int, BufferSlot] = {
-            i: BufferSlot(uid=EMPTY_SLOT, priority=1000) for i in range(self.max_loras_per_batch)
+            i: BufferSlot(uid=EMPTY_SLOT, priority=1000, status=BufferSlot.READY, pinned=False) for i in range(self.max_loras_per_batch)
         }
 
 
         self.init_buffers(base_model)
         
         self.load_lora_thread = threading.Thread(target=self.load_lora_cpu_to_gpu, daemon=True)
-        self.load_lora_thread.start()
         self.load_lora_stream = torch.cuda.Stream()
         self.stop_lora_event = threading.Event()
         self.load_lora_queue = Queue()
+
+        self.load_lora_thread.start()
+
 
     def can_support(self, config: Union[LoRAConfig, Iterable[LoRAConfig]]) -> bool:
         """
@@ -277,6 +280,8 @@ class LoRAMemoryPool:
                     return buffer_id
             logger.critical("[SYP][lora]  no enough slot for lora, need to evict")
             for buffer_id in range(0, self.max_loras_per_batch):
+                if self.buffer_id_to_uid[buffer_id].pinned:
+                    continue
                 uid = self.buffer_id_to_uid[buffer_id].uid
 
                 # Evict unneeded lora
@@ -296,7 +301,6 @@ class LoRAMemoryPool:
             raise ValueError(
                 "No available buffer slots found. Please ensure the number of active loras is less than max_loras_per_batch."
             )
-
         for uid in cur_uids:
             if uid not in self.uid_to_buffer_id:
                 buffer_id = get_available_buffer_slot()
@@ -308,17 +312,25 @@ class LoRAMemoryPool:
                 )
                 # operation = LoRAOperation(uid=uid, buffer_id=buffer_id, lora_adapter=lora_adapter, lora_modules=lora_modules)
                 # self.load_lora_queue.put(operation)
+
+                # if uid is None:
+                #     self.buffer_id_to_uid[buffer_id].pinned = True
+                #     logger.critical(f"[SYP][lora][pinned]  Loaded base model to slot {buffer_id}")
+                    
                 self.uid_to_buffer_id[uid] = buffer_id
                 self.buffer_id_to_uid[buffer_id].uid = uid
                 t2 = time.perf_counter()
                 logger.critical(f"\033[91m [SYP][lora]  Loaded LoRA {uid} in {t2 - t1:.6f} seconds\033[0m")
-        while True:
+        break_flag = False
+        while break_flag == False:
             for uid in cur_uids:
                 buffer_id = self.uid_to_buffer_id[uid]
                 if self.buffer_id_to_uid[buffer_id].status == BufferSlot.LOADING:
                     time.sleep(0.001)
                 else:
+                    break_flag = True
                     break
+        # logger.debug("All LoRAs are ready.")
 
     def load_lora_weight_to_buffer(
         self,

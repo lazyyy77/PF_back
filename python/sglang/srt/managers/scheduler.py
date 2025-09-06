@@ -358,7 +358,11 @@ class Scheduler(
             nccl_port=port_args.nccl_port,
         )
 
-        self.lora_manager = self.tp_worker.model_runner.lora_manager
+        if self.server_args.enable_lora:
+            if TpWorkerClass == TpModelWorkerClient:
+                self.lora_manager = self.tp_worker.worker.model_runner.lora_manager
+            else:
+                self.lora_manager = self.tp_worker.model_runner.lora_manager
 
         # Launch a draft worker for speculative decoding
         if self.spec_algorithm.is_eagle():
