@@ -10,7 +10,7 @@ import copy
 
 import torch
 
-from python.sglang.srt.mem_cache.lora_hiradix_cache import LoRAHiRadixCache
+# from python.sglang.srt.mem_cache.lora_hiradix_cache import LoRAHiRadixCache
 from sglang.srt.disaggregation.kv_events import (
     AllBlocksCleared,
     BlockRemoved,
@@ -55,7 +55,7 @@ class LoRATreeNode:
 
     counter = 0
 
-    def __init__(self, id: Optional[int] = None, cache: Optional[LoRAHiRadixCache] = None, ignore_holding: bool = True):
+    def __init__(self, id: Optional[int] = None, cache: Optional["LoRARadixCache"] = None, ignore_holding: bool = True):
         self.children = defaultdict(LoRATreeNode)
         self.parent: LoRATreeNode = None
         self.key: LoRAKey = None
@@ -481,9 +481,10 @@ class LoRARadixCache(BasePrefixCache):
             print(
                 " " * current_indent,
                 "|",
-                current_node.key[:10],
+                # current_node.key[:10],
                 current_node.id,
-                # len(current_node.key),
+                len(current_node.key),
+                f"p={current_node.hold_priority}",
                 f"r={current_node.lock_ref}",
                 agents_str
             )
@@ -493,7 +494,7 @@ class LoRARadixCache(BasePrefixCache):
                 assert key == self.get_child_key_fn(
                     child.key
                 ), f"{key=}, {self.get_child_key_fn(child.key)=}"
-
+                
     def _delete_leaf(self, node):
         for k, v in node.parent.children.items():
             if v == node:
@@ -630,3 +631,19 @@ class LoRARadixCache(BasePrefixCache):
         self.agent_manager.agent_last_node_id = n.id
         n.agents[agent_id].last_call_time = time.time()
         n.agents[agent_id].update_priority()
+
+    def _update_leaf_node_timestep(self):
+        leaves = self._collect_leaves()
+        logger.warning(f"[leaves][before] {[(leaf.id, leaf.hold_priority) for leaf in leaves]}")
+        update_dict = self.agent_manager.get_update_dict_agent()
+        update_log = []
+        for leaf in leaves:
+            old_priority = leaf.hold_priority
+            leaf.hold_priority = 1000
+            for agent_id in update_dict.keys():
+                if agent_id in leaf.agents:
+                    leaf.hold_priority = min(leaf.hold_priority, update_dict[agent_id])
+                    update_log.append({"id": leaf.id, "old_priority": old_priority, "new_priority": leaf.hold_priority, "agent_id": agent_id, "agent_priority": update_dict[agent_id]})
+        logger.warning(f"[leaves][after] {update_log}")
+        logger.info("[Hold][Update] Leaf node priorities updated.")
+        return

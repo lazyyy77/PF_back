@@ -26,6 +26,7 @@ from functools import partial
 from typing import TYPE_CHECKING, List, Optional
 import math
 import copy
+import logging
 
 import torch
 
@@ -41,6 +42,8 @@ from sglang.srt.managers.agent_manager import AgentManager
 
 if TYPE_CHECKING:
     from sglang.srt.managers.schedule_batch import Req
+
+logger = logging.getLogger(__name__)
 
 class AgentInfo:
     def __init__(self, agent_id: str, priority: float, hit_cnt: int, last_call_time: int, continue_call: int):
@@ -518,9 +521,10 @@ class RadixCache(BasePrefixCache):
             print(
                 " " * current_indent,
                 "|",
-                current_node.key[:10],
+                # current_node.key[:10],
                 current_node.id,
-                # len(current_node.key),
+                len(current_node.key),
+                f"p={current_node.hold_priority}",
                 f"r={current_node.lock_ref}",
                 agents_str
             )
@@ -669,6 +673,21 @@ class RadixCache(BasePrefixCache):
         self.agent_manager.agent_last_node_id = n.id
         n.agents[agent_id].last_call_time = time.time()
         n.agents[agent_id].update_priority()
+
+    def _update_leaf_node_timestep(self):
+        leaves = self._collect_leaves()
+        logger.warning(f"[leaves][before] {[(leaf.id, leaf.hold_priority) for leaf in leaves]}")
+        update_dict = self.agent_manager.get_update_dict_agent()
+        update_log = []
+        for leaf in leaves:
+            leaf.hold_priority = 1000
+            for agent_id in update_dict.keys():
+                if agent_id in leaf.agents:
+                    leaf.hold_priority = min(leaf.hold_priority, update_dict[agent_id])
+                    update_log.append({"id": leaf.id, "hold_priority": leaf.hold_priority, "agent_id": agent_id, "agent_priority": update_dict[agent_id]})
+        logger.warning(f"[leaves][after] {update_log}")
+        logger.info("[Hold][Update] Leaf node priorities updated.")
+        return
 
 if __name__ == "__main__":
     tree = RadixCache(None, None, page_size=1, disable=False)

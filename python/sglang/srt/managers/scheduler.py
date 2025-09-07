@@ -140,7 +140,7 @@ from sglang.srt.managers.utils import DPBalanceMeta, validate_input_length
 from sglang.srt.mem_cache.chunk_cache import ChunkCache, SWAChunkCache
 from sglang.srt.mem_cache.hiradix_cache import HiRadixCache
 from sglang.srt.mem_cache.lora_hiradix_cache import LoRAHiRadixCache
-from sglang.srt.mem_cache.lora_radix_cache import LoRARadixCache
+from sglang.srt.mem_cache.lora_radix_cache import LoRARadixCache, LoRAKey
 from sglang.srt.mem_cache.radix_cache import RadixCache
 from sglang.srt.mem_cache.swa_radix_cache import SWARadixCache
 from sglang.srt.model_executor.forward_batch_info import ForwardMode, PPProxyTensors
@@ -265,6 +265,7 @@ class Scheduler(
         self.last_batch_start_time = time.time()
         self.last_batch_end_time = time.time()
         self.last_batch_id = 0
+        self.batch_per_timestep = 0
 
 
         # Init inter-process communication
@@ -654,6 +655,7 @@ class Scheduler(
                         hicache_storage_prefetch_policy=server_args.hicache_storage_prefetch_policy,
                         model_name=server_args.served_model_name,
                         storage_backend_extra_config=server_args.hicache_storage_backend_extra_config,
+                        agent_manager=self.agent_manager,
                     )
                 else:
                     self.tree_cache = HiRadixCache(
@@ -674,6 +676,7 @@ class Scheduler(
                         hicache_storage_prefetch_policy=server_args.hicache_storage_prefetch_policy,
                         model_name=server_args.served_model_name,
                         storage_backend_extra_config=server_args.hicache_storage_backend_extra_config,
+                        agent_manager=self.agent_manager,
                     )
                 self.tp_worker.register_hicache_layer_transfer_counter(
                     self.tree_cache.cache_controller.layer_done_counter
@@ -701,6 +704,7 @@ class Scheduler(
                     token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
                     page_size=self.page_size,
                     disable=server_args.disable_radix_cache,
+                    agent_manager=self.agent_manager,
                 )
             else:
                 self.tree_cache = RadixCache(
@@ -709,6 +713,7 @@ class Scheduler(
                     page_size=self.page_size,
                     disable=server_args.disable_radix_cache,
                     enable_kv_cache_events=self.enable_kv_cache_events,
+                    agent_manager=self.agent_manager,
                 )
                 
         logger.warning(f"tree cache: {self.tree_cache}")
@@ -888,6 +893,7 @@ class Scheduler(
                 self.process_batch_result(
                     tmp_batch, tmp_result, batch.launch_done if batch else None
                 )
+                self.batch_per_timestep += 1
             elif batch is None:
                 # When the server is idle, do self-check and re-init some states
                 self.self_check_during_idle()
@@ -1704,6 +1710,35 @@ class Scheduler(
         if self.enable_lora:
             lora_set = set([req.lora_id for req in self.running_batch.reqs])
 
+        prefix_computed = False
+        if self.enable_hierarchical_cache:
+            for req in self.waiting_queue:
+                if not req.is_fetched:
+                    if isinstance(self.tree_cache, LoRAHiRadixCache):
+                        # LoRA-aware prefix matching
+                        (
+                            req.prefix_indices,
+                            req.last_node,
+                            req.last_host_node,
+                            req.host_hit_length,
+                        ) = self.tree_cache.match_prefix_with_lora_id(
+                            key=LoRAKey(
+                                lora_id=req.lora_id, token_ids=req.adjust_max_prefix_ids()
+                            )
+                        )
+                    else:
+                        (
+                            req.prefix_indices,
+                            req.last_node,
+                            req.last_host_node,
+                            req.host_hit_length,
+                        ) = self.tree_cache.match_prefix(
+                            key=req.adjust_max_prefix_ids()
+                        )
+                    self.tree_cache._update_agent_to_last_nodes(req, req.last_host_node)
+                    req.is_fetched = True
+            prefix_computed = True
+
         # Get requests from the waiting queue to a new prefill batch
         for req in self.waiting_queue:
 
@@ -1732,7 +1767,22 @@ class Scheduler(
                     # skip staging requests that are ongoing prefetch
                     continue
 
-            req.init_next_round_input(self.tree_cache)
+            req.init_next_round_input(
+                None if prefix_computed else self.tree_cache,
+                self.enable_hierarchical_cache,
+            )   # TODO: Check if this is needed
+            # req.init_next_round_input(self.tree_cache)
+            
+            if self.tree_cache is not None and self.enable_hierarchical_cache:
+                # self.tree_cache.ready_to_load_cache() TODO whether or not to do this. enable layer?
+                loading_status = self.tree_cache.get_node_chain_status(req.last_host_node)
+                logger.warning(f"Request {req.rid} Node {req.last_host_node.id} evicted {req.last_host_node.evicted} loading {req.last_host_node.loading} loading status: {loading_status}")
+                if loading_status == self.tree_cache.REQ_IS_EVICTED:
+                    self.tree_cache.load_back(req.last_host_node, priority=0, check_reserve=True)
+                    continue
+                elif loading_status == self.tree_cache.REQ_IS_LOADING:
+                    continue
+
             res = adder.add_one_req(req, has_chunked_req=(self.chunked_req is not None))
 
             if res != AddReqResult.CONTINUE:
@@ -1749,6 +1799,8 @@ class Scheduler(
         # Update waiting queue
         can_run_list: List[Req] = adder.can_run_list
         if len(can_run_list) == 0:
+            logger.warning(f"can run list is 0, batch is full = {self.running_batch.batch_is_full}")
+            logger.warning(f"available size: {self.token_to_kv_pool_allocator.available_size()}")
             return None
 
         if self.enable_metrics:
@@ -2637,16 +2689,30 @@ class Scheduler(
         """Handle agent priority update request"""
         if hasattr(self, 'agent_manager') and self.agent_manager is not None:
             try:
-                self.agent_manager.update_agent_timestep(recv_req.update_dict)
+                if recv_req is None:
+                    logger.error("Received None for agent timestep update request")
+                    return
+                print(f"Received agent timestep update request: {recv_req.agent_data}, {recv_req.timestep_data}, {recv_req.timestep_cnt}")
+                self.agent_manager.update_agent_timestep(recv_req.agent_data, recv_req.timestep_data)
+                self.tree_cache._update_leaf_node_timestep()
+                # if self.server_args.enable_hierarchical_cache:
+                #     self.tree_cache.pretty_print()
+                # else:
+                #     self.tree_cache.pretty_print()
+                if not self.server_args.disable_prefetch:
+                    self.prefetch_agent_timestep(prefetch_step=2)
                 last_update_time = self.last_update_time
+                end_time = time.time()                
+                lasting_time = end_time - last_update_time
+                logger.critical(f"\033[94mUPDATE\033[0m:   [{lasting_time:.3f}s][{recv_req.timestep_cnt} ts][{self.batch_per_timestep} batch] Updated agent timesteps: {recv_req.agent_data} evict: {self.tree_cache.evictable_size()}")
+                logger.critical(f"Memory stats: {self.token_to_kv_pool_allocator.get_memory_stats()}, page size: {self.token_to_kv_pool_allocator.page_size}")
+                logger.critical("==="*10)
+                self.batch_per_timestep = 0
                 self.last_update_time = time.time()
-                lasting_time = self.last_update_time - last_update_time
-                logger.info(f"\033[94mUPDATE\033[0m:   [{lasting_time:.3f}s] Updated agent timesteps: {recv_req.update_dict}")
             except Exception as e:
                 logger.error(f"Failed to update agent timesteps: {e}")
         else:
-            logger.warning("AgentManager not available, ignoring timestep update request")
-
+            logger.error("AgentManager not available, ignoring timestep update request")
 
 
 
