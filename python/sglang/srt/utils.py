@@ -66,7 +66,7 @@ from typing import (
     TypeVar,
     Union,
 )
-
+import datetime
 import numpy as np
 import psutil
 import pybase64
@@ -974,11 +974,15 @@ def configure_logger(server_args, prefix: str = ""):
         return
     format = f"[%(asctime)s{prefix}] %(message)s"
     # format = f"[%(asctime)s.%(msecs)03d{prefix}] %(message)s"
+    log_dir = "/home/yipeng/PF_back/python/logs/"
+    log_filename = datetime.datetime.now().strftime("log_%Y%m%d_%H%M%S.log")
+    log_path = os.path.join(log_dir, log_filename)
     logging.basicConfig(
         level=getattr(logging, server_args.log_level.upper()),
         format=format,
         datefmt="%Y-%m-%d %H:%M:%S",
         force=True,
+        filename=log_path
     )
 
 
