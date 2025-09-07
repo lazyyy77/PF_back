@@ -88,10 +88,12 @@ class SchedulerOutputProcessorMixin:
 
                     if req.finished():
                         self.tree_cache.cache_finished_req(req)
+                        self.tree_cache._update_leaf_node_priority(req, req.last_node)
                         req.time_stats.completion_time = time.time()
                     elif not batch.decoding_reqs or req not in batch.decoding_reqs:
                         # This updates radix so others can match
                         self.tree_cache.cache_unfinished_req(req)
+                        self.tree_cache._update_leaf_node_priority(req, req.last_node)
 
                     if batch.return_logprob:
                         assert extend_logprob_start_len_per_req is not None
@@ -185,8 +187,10 @@ class SchedulerOutputProcessorMixin:
 
                     if req.finished():
                         self.tree_cache.cache_finished_req(req)
+                        self.tree_cache._update_leaf_node_priority(req, req.last_node)
                     else:
                         self.tree_cache.cache_unfinished_req(req)
+                        self.tree_cache._update_leaf_node_priority(req, req.last_node)
                 else:
                     # being chunked reqs' prefill is not finished
                     req.is_chunked -= 1

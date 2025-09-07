@@ -376,6 +376,8 @@ class HiCacheController:
 
             self.prefetch_thread.start()
             self.backup_thread.start()
+        
+        self.is_loading = False
 
     def _generate_storage_config(
         self,

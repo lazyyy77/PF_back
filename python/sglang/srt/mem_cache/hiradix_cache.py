@@ -267,7 +267,7 @@ class HiRadixCache(RadixCache):
         if num_evicted < num_tokens:
             num_evicted += self._evict_helper(num_tokens, ignore_holding=True)
 
-    def evict_helper(self, num_tokens: int, ignore_holding: bool = False, steps: int = 1):
+    def _evict_helper(self, num_tokens: int, ignore_holding: bool = False, steps: int = 1):
         leaves = self._collect_leaves_device()
         heapq.heapify(leaves)
 
@@ -321,6 +321,7 @@ class HiRadixCache(RadixCache):
         # evict a node already written to host
         logger.debug(f"\033[33m [Evict][backuped]    node: {node.id}\033[0m")
         num_evicted = self.cache_controller.evict_device(node.value, node.host_value)
+        node.parent.hold_priority = max(node.parent.hold_priority, node.hold_priority)
         assert num_evicted > 0
         self.evictable_size_ -= num_evicted
         node.value = None
@@ -330,6 +331,7 @@ class HiRadixCache(RadixCache):
         # evict a node not initiated write to host
         logger.debug(f"\033[33m [Evict][regular]    node: {node.id}\033[0m")
         self.cache_controller.mem_pool_device_allocator.free(node.value)
+        node.parent.hold_priority = max(node.parent.hold_priority, node.hold_priority)
         num_evicted = len(node.value)
         self._delete_leaf(node)
         return num_evicted
@@ -433,6 +435,7 @@ class HiRadixCache(RadixCache):
             # no sufficient GPU memory to load back KV caches
             return None
 
+        nodes_to_load[0].hold_priority = priority if priority is not None else 0
         self.ongoing_load_back[last_hit_node.id] = (ancester_node, last_hit_node)
         offset = 0
         for node in nodes_to_load:
@@ -909,3 +912,45 @@ class HiRadixCache(RadixCache):
             n = n.parent
             logger.info(f"\033[91m [status] node id: {n.id}, evicted: {n.evicted}, loading: {n.loading}\033[0m")
         return self.REQ_IS_READY
+
+    def _update_leaf_node_timestep(self):
+        leaves = self._collect_leaves()
+        logger.warning(f"[leaves][before] {[(leaf.id, leaf.hold_priority) for leaf in leaves]}")
+        update_dict = self.agent_manager.get_update_dict_agent()
+        update_log = []
+        for leaf in leaves:
+            leaf.hold_priority = 1000
+            for agent_id in update_dict.keys():
+                if agent_id in leaf.agents:
+                    leaf.hold_priority = min(leaf.hold_priority, update_dict[agent_id])
+                    update_log.append({"id": leaf.id, "hold_priority": leaf.hold_priority, "agent_id": agent_id, "agent_priority": update_dict[agent_id]})
+        logger.warning(f"[leaves][after] {update_log}")
+        logger.info("[Hold][Update] Leaf node priorities updated.")
+        return
+
+    def hi_pretty_print(self, node: TreeNode, indent: int):
+        """Prints the radix tree in a human-readable format."""
+        stack = [(node, indent)]
+        while stack:
+            current_node, current_indent = stack.pop()
+            if current_node.agents:
+                agents_str = '{' + ', '.join(f'({k}:{v.hit_cnt})' for k, v in current_node.agents.items()) + '}'
+            else:
+                agents_str = '{}'
+            if current_node.evicted:
+                status = "EV"
+            elif current_node.loading:
+                status = "LD"
+            else:
+                status = "RY"
+            logger.warning(
+                f"{' ' * current_indent} ∟ {current_node.id} len={len(current_node.key)} priority={current_node.hold_priority} locref={current_node.lock_ref} status={status} and {agents_str}"
+            )
+            for key, child in current_node.children.items():
+                stack.append((child, current_indent + 2))
+
+                assert key == self.get_child_key_fn(
+                    child.key
+                ), f"{key=}, {self.get_child_key_fn(child.key)=}"
+
+        logger.warning(f"memory: evict={self.evictable_size()}, available={self.token_to_kv_pool_allocator.available_size()}")
