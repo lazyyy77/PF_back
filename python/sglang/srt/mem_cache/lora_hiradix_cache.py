@@ -289,7 +289,7 @@ class LoRAHiRadixCache(LoRARadixCache):
             if not x.backuped:
                 if self.cache_controller.write_policy == "write_back":
                     # write to host if the node is not backuped
-                    logger.debug(f"\033[33m [Evict]  node: {x.id}\033[0m")
+                    logger.warning(f"\033[33m [Evict]  node: {x.id}\033[0m")
                     num_evicted += self.write_backup(x, write_back=True)
                     write_back_nodes.append(x)
                 else:
@@ -307,8 +307,8 @@ class LoRAHiRadixCache(LoRARadixCache):
                 heapq.heappush(leaves, x.parent)
 
         if len(leaves) == 0:
-            logger.warning("[Evict][all] No more leaves to evict")
-        logger.warning(f"[Evict][all] evict len = {num_evicted}")
+            logger.warning("\033[33m [Evict][all] No more leaves to evict \033[0m")
+        logger.warning(f"\033[33m [Evict][all] evict len = {num_evicted} \033[0m")
 
         if self.cache_controller.write_policy == "write_back":
             self.writing_check(write_back=True)
@@ -380,7 +380,7 @@ class LoRAHiRadixCache(LoRARadixCache):
                     node.backuped
                 ), "No backup available on evicted nodes, should not happen"
                 if stop == True:
-                    logger.error(f"[Load back][bug]   node {node.id}, evicted {node.evicted}, loading {node.loading}")
+                    logger.error(f"\033[94m [Load back][bug]   node {node.id}, evicted {node.evicted}, loading {node.loading} \033[0m")
                 else:
                     nodes_to_load.insert(0, node)
             else:
@@ -395,7 +395,7 @@ class LoRAHiRadixCache(LoRARadixCache):
             ancester_node = node
 
         if len(nodes_to_load) == 0:
-            logger.warning(f"[load][return]    no nodes to load back, node-id:{node.id}, node-evicted:{node.evicted}, node-loading:{node.loading}")
+            logger.warning(f"\033[94m [load][return]    no nodes to load back, node-id:{node.id}, node-evicted:{node.evicted}, node-loading:{node.loading} \033[0m")
             return None
         total_len = sum([len(n.key) for n in nodes_to_load])
         logger.info(f"\033[94m [Load][init] back priority={priority} total_len={total_len} \033[0m")
@@ -403,7 +403,7 @@ class LoRAHiRadixCache(LoRARadixCache):
         if check_reserve:
             available_and_evictable = self.token_to_kv_pool_allocator.available_size() + self.evictable_size()
             if total_len > available_and_evictable:
-                logger.warning(f"[load][back][denied]: need {total_len}, available & evictable {available_and_evictable}")
+                logger.warning(f"\033[94m [load][back][denied]: start {nodes_to_load[0].id}, need {total_len}, available & evictable {available_and_evictable} \033[0m")
                 return None
 
         # protect the ancestor nodes from eviction
@@ -423,7 +423,7 @@ class LoRAHiRadixCache(LoRARadixCache):
         )
         if device_indices is None:
             if len(host_indices) > self.token_to_kv_pool_allocator.available_size() + self.evictable_size():
-                logger.warning(f"[load][back][denied][2]: need {len(host_indices)}, available & evictable {self.token_to_kv_pool_allocator.available_size() + self.evictable_size()}")
+                logger.warning(f"\033[94m [load][back][denied][2]: need {len(host_indices)}, available & evictable {self.token_to_kv_pool_allocator.available_size() + self.evictable_size()} \033[0m")
                 self.dec_lock_ref(ancester_node)
                 return None
             self.evict(len(host_indices))
