@@ -972,17 +972,21 @@ def configure_logger(server_args, prefix: str = ""):
             custom_config = json.loads(file.read())
         logging.config.dictConfig(custom_config)
         return
-    format = f"[%(asctime)s{prefix}] %(message)s"
-    # format = f"[%(asctime)s.%(msecs)03d{prefix}] %(message)s"
+    format = f"[%(asctime)s{prefix}] %(levelname)s %(message)s"
     log_dir = "/home/yipeng/PF_back/python/logs/"
     log_filename = datetime.datetime.now().strftime("log_%Y%m%d_%H%M%S.log")
     log_path = os.path.join(log_dir, log_filename)
+    # Write to both file and stdout
+    handlers = [
+        logging.FileHandler(log_path, encoding="utf-8"),
+        logging.StreamHandler(sys.stdout)
+    ]
     logging.basicConfig(
         level=getattr(logging, server_args.log_level.upper()),
         format=format,
         datefmt="%Y-%m-%d %H:%M:%S",
         force=True,
-        filename=log_path
+        handlers=handlers
     )
 
 

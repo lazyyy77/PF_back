@@ -1774,7 +1774,7 @@ class Scheduler(
             # req.init_next_round_input(self.tree_cache)
             
             if self.tree_cache is not None and self.enable_hierarchical_cache:
-                # self.tree_cache.ready_to_load_cache() TODO whether or not to do this. enable layer?
+                self.tree_cache.ready_to_load_host_cache() # TODO whether or not to do this? -> MUST DO IT!  enable layer?
                 loading_status = self.tree_cache.get_node_chain_status(req.last_host_node)
                 logger.warning(f"Request {req.rid} Node {req.last_host_node.id} evicted {req.last_host_node.evicted} loading {req.last_host_node.loading} loading status: {loading_status}")
                 if loading_status == self.tree_cache.REQ_IS_EVICTED:
@@ -2695,10 +2695,10 @@ class Scheduler(
                 print(f"Received agent timestep update request: {recv_req.agent_data}, {recv_req.timestep_data}, {recv_req.timestep_cnt}")
                 self.agent_manager.update_agent_timestep(recv_req.agent_data, recv_req.timestep_data)
                 self.tree_cache._update_leaf_node_timestep()
-                # if self.server_args.enable_hierarchical_cache:
-                #     self.tree_cache.pretty_print()
-                # else:
-                #     self.tree_cache.pretty_print()
+                if self.server_args.enable_hierarchical_cache:
+                    self.tree_cache.hi_pretty_print(node=self.tree_cache.root_node, indent=0)
+                else:
+                    self.tree_cache.pretty_print()
                 if not self.server_args.disable_prefetch:
                     self.prefetch_agent_timestep(prefetch_step=2)
                 last_update_time = self.last_update_time
