@@ -2700,11 +2700,11 @@ class Scheduler(
                 else:
                     self.tree_cache.pretty_print()
                 if not self.server_args.disable_prefetch:
-                    self.prefetch_agent_timestep(prefetch_step=2)
+                    self.prefetch_agent_timestep(prefetch_step=self.server_args.load_ahead_step)
                 last_update_time = self.last_update_time
                 end_time = time.time()                
                 lasting_time = end_time - last_update_time
-                logger.critical(f"\033[94mUPDATE\033[0m:   [{lasting_time:.3f}s][{recv_req.timestep_cnt} ts][{self.batch_per_timestep} batch] Updated agent timesteps: {recv_req.agent_data} evict: {self.tree_cache.evictable_size()}")
+                logger.critical(f"\033[94mUPDATE\033[0m:   [{lasting_time:.3f}s][{recv_req.timestep_cnt} ts][{self.batch_per_timestep} batch] Updated timestep data: {recv_req.timestep_data}, Updated agent data: {recv_req.agent_data} evict: {self.tree_cache.evictable_size()}")
                 logger.critical(f"Memory stats: {self.token_to_kv_pool_allocator.get_memory_stats()}, page size: {self.token_to_kv_pool_allocator.page_size}")
                 logger.critical("==="*10)
                 self.batch_per_timestep = 0
