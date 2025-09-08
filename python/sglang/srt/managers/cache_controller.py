@@ -533,48 +533,48 @@ class HiCacheController:
             except Exception as e:
                 logger.error(e)
 
-    def load_thread_func_layer_by_layer(self):
-        """
-        Load KV caches from host memory to device memory layer by layer.
-        """
-        torch.cuda.set_stream(self.load_stream)
-        while not self.stop_event.is_set():
-            self.load_cache_event.wait(timeout=1)
-            if not self.load_cache_event.is_set():
-                continue
-            self.load_cache_event.clear()
-            self.layer_done_counter.update_producer()
+    # def load_thread_func_layer_by_layer(self):
+    #     """
+    #     Load KV caches from host memory to device memory layer by layer.
+    #     """
+    #     torch.cuda.set_stream(self.load_stream)
+    #     while not self.stop_event.is_set():
+    #         self.load_cache_event.wait(timeout=1)
+    #         if not self.load_cache_event.is_set():
+    #             continue
+    #         self.load_cache_event.clear()
+    #         self.layer_done_counter.update_producer()
 
-            batch_operation = None
-            while self.load_queue.qsize() > 0:
-                op = self.load_queue.get(block=True)
-                if batch_operation is None:
-                    batch_operation = op
-                else:
-                    batch_operation.merge(op)
-            if batch_operation is None:
-                continue
+    #         batch_operation = None
+    #         while self.load_queue.qsize() > 0:
+    #             op = self.load_queue.get(block=True)
+    #             if batch_operation is None:
+    #                 batch_operation = op
+    #             else:
+    #                 batch_operation.merge(op)
+    #         if batch_operation is None:
+    #             continue
 
-            # start layer-wise KV cache transfer from CPU to GPU
-            self.layer_done_counter.reset()
-            host_indices, device_indices = self.move_indices(
-                batch_operation.host_indices, batch_operation.device_indices
-            )
-            for i in range(self.mem_pool_host.layer_num):
-                self.mem_pool_host.load_to_device_per_layer(
-                    self.mem_pool_device,
-                    host_indices,
-                    device_indices,
-                    i,
-                    self.io_backend,
-                )
-                self.load_stream.synchronize()
-                self.layer_done_counter.increment()
+    #         # start layer-wise KV cache transfer from CPU to GPU
+    #         self.layer_done_counter.reset()
+    #         host_indices, device_indices = self.move_indices(
+    #             batch_operation.host_indices, batch_operation.device_indices
+    #         )
+    #         for i in range(self.mem_pool_host.layer_num):
+    #             self.mem_pool_host.load_to_device_per_layer(
+    #                 self.mem_pool_device,
+    #                 host_indices,
+    #                 device_indices,
+    #                 i,
+    #                 self.io_backend,
+    #             )
+    #             self.load_stream.synchronize()
+    #             self.layer_done_counter.increment()
 
-            self.mem_pool_host.complete_io(batch_operation.host_indices)
-            for node_id in batch_operation.node_ids:
-                if node_id != 0:
-                    self.ack_load_queue.put(node_id)
+    #         self.mem_pool_host.complete_io(batch_operation.host_indices)
+    #         for node_id in batch_operation.node_ids:
+    #             if node_id != 0:
+    #                 self.ack_load_queue.put(node_id)
 
     def load_thread_func_layer_by_layer(self):
         """
@@ -594,127 +594,78 @@ class HiCacheController:
 
                 try:
                     operation = self.load_queue.get(block=True, timeout=1.0)
-                    logger.critical(f"\033[95mLoaded operation from queue\033[0m")
+                    logger.info(f"\033[95mLoaded operation from queue\033[0m")
                 except:
                     operation = None
-                
-                # try:
-                #     while self.load_queue.qsize() > 0:
-                #         op = self.load_queue.get(block=True)
-                #         if operation is None:
-                #             operation = op
-                #         elif op.priority == operation.priority:
-                #             operation.merge(op)
-                #         else:
-                #             self.load_queue.put(op)
-                #             break
-                # except:
-                #     operation = None
 
-                if operation is not None and operation.priority == 100000:
-                    logger.warning("inside load thread lbl, operation is not None and priority is 0")
-                    # try:
-                    #     merge_cnt = 0
-                    #     while self.load_queue.qsize() > 0:
-                    #         op = self.load_queue.queue[0]
-                    #         if op.priority == 0:
-                    #             op = self.load_queue.get(block=True)
-                    #             operation.merge(op)
-                    #             merge_cnt += 1
-                    #         else:
-                    #             break
-                    #     logger.info(f"[Ctrl]    Merged {merge_cnt} operations into one")
-                    #     self.layer_done_counter.reset()
-                    #     host_indices, device_indices = self.move_indices(
-                    #         operation.host_indices, operation.device_indices
-                    #     )
-                    #     for i in range(self.mem_pool_host.layer_num):
-                    #         self.mem_pool_device.load_from_host_per_layer(
-                    #             self.mem_pool_host,
-                    #             host_indices,
-                    #             device_indices,
-                    #             i,
-                    #             self.io_backend,
-                    #         )
-                    #         self.load_stream.synchronize()
-                    #         self.layer_done_counter.increment()
 
-                    #     logger.info(f"[Ctrl]    Completed loading operation of node {operation.node_id}, priority: {operation.priority}")
-
-                    #     self.mem_pool_host.complete_io(operation.host_indices)
-                    #     for node_id in operation.node_ids:
-                    #         if node_id != 0:
-                    #             self.ack_load_queue.put(node_id)
-                    # except Exception as e:
-                    #     logger.critical(f"Error during load operation with priority 0: {e}")
-                else:
-                    is_interrupt = False
-                    interrupted_operation = []
-                    try:
-                        is_interrupt = self._check_interrupt_signal(operation)
-                        if is_interrupt == True:
-                            if operation is not None:
-                                interrupted_operation.append(operation)
-                                logger.info(f"\033[93m[Interrupt]   Interrupt operation {operation.id}, node {operation.node_id}, priority: {operation.priority}\033[0m")
-                            self._handle_outdated_operations(interrupted_operation)
-                        if operation is None or is_interrupt == True:
-                            continue
+                is_interrupt = False
+                interrupted_operation = []
+                try:
+                    is_interrupt = self._check_interrupt_signal(operation)
+                    if is_interrupt == True:
+                        if operation is not None:
+                            interrupted_operation.append(operation)
+                            logger.warning(f"\033[93m[Interrupt]   Interrupt operation {operation.id}, node {operation.node_id}, priority: {operation.priority}\033[0m")
+                        self._handle_outdated_operations(interrupted_operation)
+                    if operation is None or is_interrupt == True:
+                        continue
                         
-                        while self.load_queue.qsize() > 0:
-                            op = self.load_queue.get(block=True)
-                            if op.priority == operation.priority:
-                                operation.merge(op)
-                            else:
-                                self.load_queue.put(op)
-                                break
+                    while self.load_queue.qsize() > 0:
+                        op = self.load_queue.get(block=True)
+                        if op.priority == operation.priority:
+                            operation.merge(op)
+                        else:
+                            self.load_queue.put(op)
+                            break
 
-                        t1 = time.perf_counter()
-                        is_interrupt = False
-                        self.layer_done_counter.reset()
-                        host_indices, device_indices = self.move_indices(operation.host_indices, operation.device_indices)
+                    t1 = time.perf_counter()
+                    is_interrupt = False
+                    self.layer_done_counter.reset()
+                    host_indices, device_indices = self.move_indices(operation.host_indices, operation.device_indices)
 
-                        for layer_i in range(self.mem_pool_host.layer_num):
-                            is_interrupt = self._check_interrupt_signal(operation)
-                            if is_interrupt:
-                                interrupted_operation = [operation]
-                                logger.info(f"\033[93m[Interrupt][layer_{layer_i}]   Interrupt operation {operation.id}, node {operation.node_id}, priority: {operation.priority}\033[0m")
-                                self._handle_outdated_operations(interrupted_operation)
-                                break
-                            self.mem_pool_host.load_to_device_per_layer(
-                                self.mem_pool_device,
-                                host_indices,
-                                device_indices,
-                                layer_i,
-                                self.io_backend,
-                            )
-                            self.load_stream.synchronize()
-                            self.layer_done_counter.increment()
+                    for layer_i in range(self.mem_pool_host.layer_num):
+                        is_interrupt = self._check_interrupt_signal(operation)
+                        if is_interrupt:
+                            interrupted_operation = [operation]
+                            logger.warning(f"\033[93m[Interrupt][layer_{layer_i}]   Interrupt operation {operation.id}, node {operation.node_id}, priority: {operation.priority}\033[0m")
+                            self._handle_outdated_operations(interrupted_operation)
+                            break
+                        self.mem_pool_host.load_to_device_per_layer(
+                            self.mem_pool_device,
+                            host_indices,
+                            device_indices,
+                            layer_i,
+                            self.io_backend,
+                        )
+                        self.load_stream.synchronize()
+                        self.layer_done_counter.increment()
 
-                        t2 = time.perf_counter()
-                        logger.warning(f"[CC][is_interrupt = {is_interrupt}]    time = {t2 - t1}, node {operation.node_ids}, priority: {operation.priority}")
-                        if operation.priority == 0:
+                    t2 = time.perf_counter()
+                    logger.warning(f"[CC][is_interrupt = {is_interrupt}]    time = {t2 - t1}, node {operation.node_ids}, priority: {operation.priority}")
+                    if operation.priority == 0:
+                        self.loading_time = 0
+                    else:
+                        if self.print_flag != operation.priority:
+                            self.print_flag = operation.priority
+                            logger.warning(f"[CC][all]    Loading time for priority {operation.priority}: {self.loading_time}")
                             self.loading_time = 0
                         else:
-                            if self.print_flag != operation.priority:
-                                self.print_flag = operation.priority
-                                logger.warning(f"[CC][all]    Loading time for priority {operation.priority}: {self.loading_time}")
-                                self.loading_time = 0
-                            else:
-                                self.loading_time += t2 - t1
-                        self.print_flag = operation.priority
+                            self.loading_time += t2 - t1
+                    self.print_flag = operation.priority
 
-                        if is_interrupt:
-                            continue
+                    if is_interrupt:
+                        continue
 
-                        self.mem_pool_host.complete_io(operation.host_indices)
-                        for node_id in operation.node_ids:
-                            if node_id != 0:
-                                self.ack_load_queue.put(node_id)
+                    self.mem_pool_host.complete_io(operation.host_indices)
+                    for node_id in operation.node_ids:
+                        if node_id != 0:
+                            self.ack_load_queue.put(node_id)
 
-                    except Exception as e:
-                        logger.error(f"Error during load operation: {e}")
-                        interrupted_operation = [operation]
-                        self._handle_outdated_operations(interrupted_operation)
+                except Exception as e:
+                    logger.error(f"Error during load operation: {e}")
+                    interrupted_operation = [operation]
+                    self._handle_outdated_operations(interrupted_operation)
 
     def evict_device(
         self, device_indices: torch.Tensor, host_indices: torch.Tensor
