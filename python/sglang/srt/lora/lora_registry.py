@@ -81,9 +81,6 @@ class LoRARegistry:
         if lora_paths:
             for lora_ref in lora_paths:
                 self._register_adapter(lora_ref)
-        
-        update_registry_dict, update_counter_dict = self._get_update_dict()
-        self.update_callback(update_registry_dict)
 
 
     async def register(self, lora_ref: LoRARef):
@@ -204,6 +201,7 @@ class LoRARegistry:
         self._counters[lora_ref.lora_id] = ConcurrentCounter()
         
         update_registry_dict, update_counter_dict = self._get_update_dict()
+        print(f"[lora][registry][TokenManager] Updated LoRA registry: {update_registry_dict}")
         self.update_callback(update_registry_dict)
         
         return lora_ref

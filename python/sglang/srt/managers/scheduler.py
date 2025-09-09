@@ -72,6 +72,7 @@ from sglang.srt.managers.io_struct import (
     ClearHiCacheReqInput,
     ClearHiCacheReqOutput,
     CloseSessionReqInput,
+    DebugReq,
     ExpertDistributionReq,
     ExpertDistributionReqOutput,
     FlushCacheReqInput,
@@ -81,6 +82,7 @@ from sglang.srt.managers.io_struct import (
     GetInternalStateReqOutput,
     GetWeightsByNameReqInput,
     HealthCheckOutput,
+    InitReq,
     InitWeightsUpdateGroupReqInput,
     LoadLoRAAdapterReqInput,
     LoadLoRAAdapterReqOutput,
@@ -573,6 +575,8 @@ class Scheduler(
                 (MultiTokenizerRegisterReq, self.register_multi_tokenizer),
                 (UpdateAgentTimestepReq, self.update_agent_timestep),
                 (UpdateLoraRegistryReq, self.update_lora_registry),
+                (DebugReq, self.handle_debug_req),
+                (InitReq, self.handle_init_req),
             ]
         )
 
@@ -844,6 +848,7 @@ class Scheduler(
         
         control_message_types = (
             UpdateLoraRegistryReq,
+            DebugReq,
         )
         return isinstance(recv_req, control_message_types)
 
@@ -2662,16 +2667,15 @@ class Scheduler(
         else:
             logger.warning("AgentManager not available, ignoring timestep update request")
 
-
-
     def update_lora_registry(self, recv_req: UpdateLoraRegistryReq):
         """Update the LoRA adapter registry and forward to detokenizer."""
         try:
             self.lora_registry = recv_req.update_registry_dict
+            logger.info(f"\033[94m [Lora][Updated]\033[0m    Updated LoRA registry: {self.lora_registry}")
         except Exception as e:
             logger.error(f"Failed to update LoRA registry: {e}")
         
-    def prefetch_lora_timesteps(self, lora_name: Optional[str], priority: int = 0, step_lora_names: List[int] = []) -> bool:
+    def prefetch_lora_timesteps(self, lora_name: Optional[str], priority: int = 0, step_lora_names: List[str] = []) -> bool:
         """Prefetch LoRA adapter weights for the next few time steps."""
         # remember to call update_lora_priority before this
         if not self.lora_registry or lora_name is None:
@@ -2679,6 +2683,24 @@ class Scheduler(
         lora_id = self.lora_registry.get(lora_name, None)
         step_lora_ids = [self.lora_registry.get(name, None) for name in step_lora_names if name in self.lora_registry]
         return self.lora_manager.prefetch_lora_weights(priority=priority, lora_id=lora_id, step_lora_ids=step_lora_ids)
+
+    def handle_debug_req(self, recv_req: DebugReq):
+        lora_ids = recv_req.lora_ids
+        for i in range(len(lora_ids)):
+            lora_names = lora_ids[i]
+            for lora_name in lora_ids[i]:
+                self.prefetch_lora_timesteps(lora_name=lora_name, priority=i, step_lora_names=lora_names)
+
+    def handle_init_req(self, recv_req: InitReq):
+        """Handle init request: flush cache and initialize lora_registry if needed."""
+        try:
+            self.flush_cache()
+            logger.info("[Init] Scheduler cache flushed successfully on init request!")
+            if recv_req.update_registry_dict:
+                self.lora_registry = recv_req.update_registry_dict
+                logger.info(f"[Init][Lora][Updated] Initialized LoRA registry: {self.lora_registry}")
+        except Exception as e:
+            logger.error(f"Failed to handle init request: {e}")
 
 class IdleSleeper:
     """
