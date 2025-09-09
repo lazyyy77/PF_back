@@ -72,6 +72,7 @@ from sglang.srt.managers.io_struct import (
     AbortReq,
     CloseSessionReqInput,
     ConfigureLoggingReq,
+    DebugReq,
     EmbeddingReqInput,
     GenerateReqInput,
     GetWeightsByNameReqInput,
@@ -1093,6 +1094,27 @@ async def v1_update(update_map: dict[str, Any]):
     except Exception as e:
         return {"status": "error", "message": f"Failed to update agent timesteps: {str(e)}"}
 
+@app.post("/v1/init")
+async def v1_initialize():
+    try:
+        if _global_state.tokenizer_manager is not None:
+            _global_state.tokenizer_manager.init_server_personalize()
+            return {"status": "success", "message": "LoRA registry initialized successfully"}
+        else:
+            return {"status": "error", "message": "TokenizerManager not available"}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to do initialization: {str(e)}"}
+
+@app.post("/v1/debug")
+async def v1_debug(obj: DebugReq):
+    """Debug endpoint."""
+    try:
+        lora_ids = obj.lora_ids if obj.lora_ids else []
+        _global_state.tokenizer_manager.handle_debug_req(lora_ids)
+        return {"status": "success"}
+    except Exception as e:
+        logger.error(f"Exception in v1_debug: {e}")
+        return {"status": "error", "message": f"Failed to process debug request: {str(e)}"}
 
 @app.api_route(
     "/v1/rerank", methods=["POST", "PUT"], dependencies=[Depends(validate_json_request)]
@@ -1405,13 +1427,14 @@ def _wait_and_warmup(
             return
     else:
         _global_state.tokenizer_manager.server_status = ServerStatus.Up
-
+    
     try:
-        ret = asyncio.run(_global_state.tokenizer_manager.flush_cache())
-        logger.info(f"Cache flushed automatically after warmup: {ret}")
+        url = server_args.url()
+        res = requests.post(url + "/v1/init")
+        logger.info(f"v1/initialize response: {res.status_code}, {res.text}")
     except Exception as e:
-        logger.error(f"Failed to flush cache after warmup: {e}")
-        
+        logger.error(f"Failed to call v1/initialize: {e}")
+     
     logger.info("The server is fired up and ready to roll!")
 
     if pipe_finish_writer is not None:
