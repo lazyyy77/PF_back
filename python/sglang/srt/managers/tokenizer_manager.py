@@ -106,6 +106,7 @@ from sglang.srt.managers.io_struct import (
     ReleaseMemoryOccupationReqOutput,
     ResumeMemoryOccupationReqInput,
     ResumeMemoryOccupationReqOutput,
+    SelfDebugReq,
     SessionParams,
     SetInternalStateReq,
     SetInternalStateReqOutput,
@@ -281,7 +282,6 @@ class TokenizerManager:
             self.send_to_scheduler = get_zmq_socket(
                 context, zmq.PUSH, port_args.scheduler_input_ipc_name, True
             )
-            
         self.send_to_scheduler_control = get_zmq_socket(
             context, zmq.PUSH, port_args.scheduler_control_ipc_name, True
         )

@@ -1218,13 +1218,6 @@ class BlockReqInput:
 
 
 @dataclass
-class UpdateLoraRegistryReq:
-    # The update dictionary for LoRA registry
-    update_registry_dict: Dict[str, str]
-    update_counter_dict: Dict[str, int]
-
-
-@dataclass
 class UpdateAgentTimestepReq:
     # The update dictionary for agent priorities
     agent_data: Dict[str, Any]
@@ -1233,10 +1226,6 @@ class UpdateAgentTimestepReq:
 
 
 @dataclass
-class DebugReq:
-    lora_ids: Dict[int, List[str]]
-
-
-@dataclass
-class InitReq:
-    update_registry_dict: Dict[str, str]
+class SelfDebugReq:
+    prompt: list[int]
+    agent_id: str

@@ -455,7 +455,6 @@ class ChatCompletionRequest(BaseModel):
 
     # For PFEngine Backend
     agent_id: Optional[Union[List[str], str]] = None
-    lora_path: Optional[Union[List[Optional[str]], Optional[str]]] = None
 
     @model_validator(mode="before")
     @classmethod
