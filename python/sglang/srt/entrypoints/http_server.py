@@ -83,7 +83,6 @@ from sglang.srt.managers.io_struct import (
     ProfileReqInput,
     ReleaseMemoryOccupationReqInput,
     ResumeMemoryOccupationReqInput,
-    SelfDebugReq,
     SeparateReasoningReqInput,
     SetInternalStateReq,
     SlowDownReqInput,
@@ -1098,10 +1097,10 @@ async def v1_update(obj: UpdateAgentTimestepReq):
         return {"status": "error", "message": f"Failed to update agent timesteps: {str(e)}"}
 
 @app.post("/v1/debug")
-async def v1_debug(obj: SelfDebugReq):
+async def v1_debug(obj: DebugReq):
     """Debug endpoint to inspect the current state."""
     try:
-        _global_state.tokenizer_manager.self_debug_request()
+        _global_state.tokenizer_manager.debug_request(obj.lora_ids)
         return {"status": "success", "message": "Debug inject successfully"}
     except Exception as e:
         logger.error(f"Exception in v1_debug: {e}")

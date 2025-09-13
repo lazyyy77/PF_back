@@ -106,7 +106,6 @@ from sglang.srt.managers.io_struct import (
     ReleaseMemoryOccupationReqOutput,
     ResumeMemoryOccupationReqInput,
     ResumeMemoryOccupationReqOutput,
-    SelfDebugReq,
     SessionParams,
     SetInternalStateReq,
     SetInternalStateReqOutput,

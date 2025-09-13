@@ -1226,6 +1226,7 @@ class UpdateAgentTimestepReq:
 
 
 @dataclass
-class SelfDebugReq:
-    prompt: list[int]
-    agent_id: str
+class DebugReq:
+    lora_ids: Dict[int, List[str]]
+    # prompt: list[int]
+    # agent_id: str
