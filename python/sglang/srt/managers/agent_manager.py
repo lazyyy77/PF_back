@@ -23,10 +23,10 @@ class AgentManager:
         with self.lock:
             self.update_dict_agent = update_dict_agent
             self.update_dict_timestep = update_dict_timestep
-        if self.update_dict_agent is None:
-            logger.error("\033[91mupdate_dict_agent is None\033[0m")
-        if self.update_dict_timestep is None:
-            logger.warning("\033[91mupdate_dict_timestep is None\033[0m")
+        if self.update_dict_agent is None or len(self.update_dict_agent) == 0:
+            logger.error("\033[91mupdate_dict_agent is None or empty\033[0m")
+        if self.update_dict_timestep is None or len(self.update_dict_timestep) == 0:
+            logger.warning("\033[91mupdate_dict_timestep is None or empty\033[0m")
 
     def get_agent_hold_priority(self, agent_id: str) -> int:
         if agent_id is None:

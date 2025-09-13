@@ -4,9 +4,11 @@ import threading
 import time
 from queue import Queue
 from typing import List, Optional
+import copy
 
 import torch
 
+from sglang.srt.managers.agent_manager import AgentManager
 from sglang.srt.managers.cache_controller import HiCacheController, PrefetchOperation
 from sglang.srt.mem_cache.allocator import BaseTokenToKVPoolAllocator
 from sglang.srt.mem_cache.base_prefix_cache import MatchResult
@@ -27,6 +29,10 @@ logger = logging.getLogger(__name__)
 
 class LoRAHiRadixCache(LoRARadixCache):
 
+    REQ_IS_EVICTED = 0
+    REQ_IS_LOADING = 1
+    REQ_IS_READY = 2
+
     def __init__(
         self,
         req_to_token_pool: ReqToTokenPool,
@@ -42,6 +48,7 @@ class LoRAHiRadixCache(LoRARadixCache):
         hicache_storage_prefetch_policy: Optional[str] = "best_effort",
         model_name: Optional[str] = None,
         storage_backend_extra_config: Optional[str] = None,
+        agent_manager: Optional[AgentManager] = None,
     ):
 
         if hicache_io_backend == "direct":
@@ -79,6 +86,8 @@ class LoRAHiRadixCache(LoRARadixCache):
         self.prefetch_timeout = 3  # seconds
         self.prefetch_stop_policy = hicache_storage_prefetch_policy
 
+        self.agent_manager = agent_manager
+
         self.load_cache_event = threading.Event()
         self.cache_controller = HiCacheController(
             token_to_kv_pool_allocator,
@@ -105,9 +114,9 @@ class LoRAHiRadixCache(LoRARadixCache):
         self.write_through_threshold = (
             1 if hicache_write_policy == "write_through" else 2
         )
-        self.load_back_threshold = 10   # TODO change to 0
+        self.load_back_threshold = 0   # TODO change to 0
         super().__init__(
-            req_to_token_pool, token_to_kv_pool_allocator, page_size, disable=False
+            req_to_token_pool, token_to_kv_pool_allocator, page_size, disable=False, agent_manager=self.agent_manager
         )
         logger.info(f"HiRadixCache initialized with write_policy = {hicache_write_policy}, write_through_threshold = {self.write_through_threshold}, "
                     f"io_backend = {hicache_io_backend}, storage_backend = {hicache_storage_backend}, layout = {hicache_mem_layout}")
@@ -135,6 +144,7 @@ class LoRAHiRadixCache(LoRARadixCache):
             return False
 
     def write_backup(self, node: LoRATreeNode, write_back=False):
+        logger.info(f"Write back node {node.id} to host, len {len(node.key)}")
         host_indices = self.cache_controller.write(
             device_indices=node.value,
             node_id=node.id,
@@ -204,22 +214,64 @@ class LoRAHiRadixCache(LoRARadixCache):
     def loading_check(self):
         while not self.cache_controller.ack_load_queue.empty():
             try:
-                ack_id = self.cache_controller.ack_load_queue.get_nowait()
-                start_node, end_node = self.ongoing_load_back[ack_id]
-                self.dec_lock_ref(end_node)
-                while end_node != start_node:
-                    assert end_node.loading
-                    end_node.loading = False
-                    end_node = end_node.parent
-                # clear the reference
-                del self.ongoing_load_back[ack_id]
-            except Exception:
-                break
+                ack_msg = self.cache_controller.ack_load_queue.get_nowait()
+                if isinstance(ack_msg, dict):
+                    node_id = ack_msg["node_id"]
+                    success = ack_msg["success"]
+                else:
+                    node_id = ack_msg
+                    success = True
+
+                if node_id in self.ongoing_load_back:
+                    start_node, end_node = self.ongoing_load_back[node_id]
+                    cur_node = end_node
+                    if success:
+                        while cur_node != start_node:
+                            assert cur_node.loading
+                            cur_node.loading = False
+                            cur_node = cur_node.parent
+                        self.dec_lock_ref(end_node)
+                        logger.info(f"Node {end_node.id} loading successfully")
+                    else:
+                        self.dec_lock_ref(end_node)
+                        while cur_node != start_node:
+                            assert cur_node.loading
+                            cur_node.loading = False
+                            self._evict_backuped(cur_node)
+                            cur_node = cur_node.parent
+                        logger.error(f"\033[91mNode {end_node.id} loading failed\033[0m")
+
+                    del self.ongoing_load_back[node_id]
+                else:
+                    logger.error(f"\033[91m [Check][load]    Node {node_id} loading not in progress\033[0m")
+                    # raise ValueError("Node loading not in progress")
+                # ack_id = self.cache_controller.ack_load_queue.get_nowait()
+                # start_node, end_node = self.ongoing_load_back[ack_id]
+                # self.dec_lock_ref(end_node)
+                # while end_node != start_node:
+                #     assert end_node.loading
+                #     end_node.loading = False
+                #     end_node = end_node.parent
+                # # clear the reference
+                # del self.ongoing_load_back[ack_id]
+            except Exception as e:
+                logger.error(f"Error occurred while checking loading status for node {node_id}: {e}")
+                continue
 
     def evictable_size(self):
         return self.evictable_size_
 
     def evict(self, num_tokens: int):
+        num_evicted = 0
+        # steps = self.agent_manager.hold_step - 1
+        steps = 1
+        while num_evicted < num_tokens and steps > 0:
+            num_evicted += self._evict_helper(num_tokens, ignore_holding=False, steps=steps)
+            steps -= 1
+        if num_evicted < num_tokens:
+            num_evicted += self._evict_helper(num_tokens, ignore_holding=True)
+
+    def _evict_helper(self, num_tokens: int, ignore_holding: bool = False, steps: int = 1):
         leaves = self._collect_leaves_device()
         heapq.heapify(leaves)
 
@@ -228,12 +280,18 @@ class LoRAHiRadixCache(LoRARadixCache):
         while num_evicted < num_tokens and len(leaves):
             x = heapq.heappop(leaves)
 
-            if x.lock_ref > 0:
+            if x.lock_ref > 0 or x.loading:
                 continue
+
+            if ignore_holding is False:
+                _, priority = self.agent_manager.get_agents_hold_priority(list(x.agents.keys()))
+                if priority > steps:
+                    continue
 
             if not x.backuped:
                 if self.cache_controller.write_policy == "write_back":
                     # write to host if the node is not backuped
+                    logger.warning(f"\033[33m [Evict]  node: {x.id}\033[0m")
                     num_evicted += self.write_backup(x, write_back=True)
                     write_back_nodes.append(x)
                 else:
@@ -250,15 +308,23 @@ class LoRAHiRadixCache(LoRARadixCache):
                 # all children are evicted or no children
                 heapq.heappush(leaves, x.parent)
 
+        if len(leaves) == 0:
+            logger.warning("\033[33m [Evict][all] No more leaves to evict \033[0m")
+        logger.warning(f"\033[33m [Evict][all] evict len = {num_evicted} \033[0m")
+
         if self.cache_controller.write_policy == "write_back":
             self.writing_check(write_back=True)
             for node in write_back_nodes:
                 assert node.backuped
                 self._evict_backuped(node)
+        
+        return num_evicted
 
     def _evict_backuped(self, node: LoRATreeNode):
         # evict a node already written to host
+        logger.debug(f"\033[33m [Evict][backuped]    node: {node.id}\033[0m")
         num_evicted = self.cache_controller.evict_device(node.value, node.host_value)
+        node.parent.hold_priority = max(node.parent.hold_priority, node.hold_priority)
         assert num_evicted > 0
         self.evictable_size_ -= num_evicted
         node.value = None
@@ -266,7 +332,9 @@ class LoRAHiRadixCache(LoRARadixCache):
 
     def _evict_regular(self, node: LoRATreeNode):
         # evict a node not initiated write to host
+        logger.debug(f"\033[33m [Evict][regular]    node: {node.id}\033[0m")
         self.cache_controller.mem_pool_device_allocator.free(node.value)
+        node.parent.hold_priority = max(node.parent.hold_priority, node.hold_priority)
         num_evicted = len(node.value)
         self._delete_leaf(node)
         return num_evicted
@@ -299,20 +367,46 @@ class LoRAHiRadixCache(LoRARadixCache):
                 heapq.heappush(leaves, x.parent)
 
     def load_back(
-        self, node: LoRATreeNode, mem_quota: Optional[int] = None
+        self, node: LoRATreeNode, mem_quota: Optional[int] = None, priority: Optional[int] = None, check_reserve: Optional[bool] = False
     ) -> Optional[torch.Tensor]:
         # todo: more loading policies
 
         last_hit_node = node
         nodes_to_load = []
-        while node.evicted:
-            assert (
-                node.backuped
-            ), "No backup available on evicted nodes, should not happen"
-            nodes_to_load.insert(0, node)
+        stop = False
+        ancester_node = None
+
+        while node != self.root_node:
+            if node.evicted:
+                assert (
+                    node.backuped
+                ), "No backup available on evicted nodes, should not happen"
+                if stop == True:
+                    logger.error(f"\033[94m [Load back][bug]   node {node.id}, evicted {node.evicted}, loading {node.loading} \033[0m")
+                else:
+                    nodes_to_load.insert(0, node)
+            else:
+                stop = True
+                if ancester_node is None:
+                    ancester_node = node
             node = node.parent
-        else:
+        # else:
+        #     ancester_node = node
+        
+        if ancester_node is None:
             ancester_node = node
+
+        if len(nodes_to_load) == 0:
+            logger.warning(f"\033[94m [load][return]    no nodes to load back, node-id:{node.id}, node-evicted:{node.evicted}, node-loading:{node.loading} \033[0m")
+            return None
+        total_len = sum([len(n.key) for n in nodes_to_load])
+        logger.info(f"\033[94m [Load][init] back priority={priority} total_len={total_len} \033[0m")
+
+        if check_reserve:
+            available_and_evictable = self.token_to_kv_pool_allocator.available_size() + self.evictable_size()
+            if total_len > available_and_evictable:
+                logger.warning(f"\033[94m [load][back][denied]: start {nodes_to_load[0].id}, need {total_len}, available & evictable {available_and_evictable} \033[0m")
+                return None
 
         # protect the ancestor nodes from eviction
         delta = self.inc_lock_ref(ancester_node)
@@ -327,18 +421,23 @@ class LoRAHiRadixCache(LoRARadixCache):
             return None
 
         device_indices = self.cache_controller.load(
-            host_indices=host_indices, node_id=last_hit_node.id
+            host_indices=host_indices, node_id=last_hit_node.id, priority=priority
         )
         if device_indices is None:
+            if len(host_indices) > self.token_to_kv_pool_allocator.available_size() + self.evictable_size():
+                logger.warning(f"\033[94m [load][back][denied][2]: need {len(host_indices)}, available & evictable {self.token_to_kv_pool_allocator.available_size() + self.evictable_size()} \033[0m")
+                self.dec_lock_ref(ancester_node)
+                return None
             self.evict(len(host_indices))
             device_indices = self.cache_controller.load(
-                host_indices=host_indices, node_id=last_hit_node.id
+                host_indices=host_indices, node_id=last_hit_node.id, priority=priority
             )
         self.dec_lock_ref(ancester_node)
         if device_indices is None:
             # no sufficient GPU memory to load back KV caches
             return None
 
+        nodes_to_load[0].hold_priority = priority if priority is not None else 0
         self.ongoing_load_back[last_hit_node.id] = (ancester_node, last_hit_node)
         offset = 0
         for node in nodes_to_load:
@@ -347,6 +446,7 @@ class LoRAHiRadixCache(LoRARadixCache):
             node.loading = True
         self.evictable_size_ += len(device_indices)
         self.inc_lock_ref(last_hit_node)
+        logger.info(f"\033[94m [Load][submit] back priority={priority} total_len={total_len} \033[0m")
 
         return device_indices
 
@@ -355,10 +455,12 @@ class LoRAHiRadixCache(LoRARadixCache):
         last_node: LoRATreeNode,
         host_hit_length: int,
         mem_quota: Optional[int] = None,
+        priority: Optional[int] = None
     ):
         _ = host_hit_length  # unused, but kept for compatibility
         if last_node.evicted:
-            loading_values = self.load_back(last_node, mem_quota)
+            logger.critical(f"\033[94m Init Load back node {last_node.id} \033[0m")
+            loading_values = self.load_back(last_node, mem_quota, priority)
             if loading_values is not None:
                 logger.debug(
                     f"loading back {len(loading_values)} tokens for node {last_node.id}"
@@ -629,13 +731,14 @@ class LoRAHiRadixCache(LoRARadixCache):
                 child_key = self.get_child_key_fn(key)
 
         if len(key):
-            new_node = TreeNode()
+            new_node = LoRATreeNode(cache=self, ignore_holding=False)
             new_node.parent = node
             new_node.key = key
             new_node.value = None
             new_node.host_value = host_value
             new_node.hash_value = hash_value
             node.children[child_key] = new_node
+            new_node.agents = copy.deepcopy(node.agents)
         return matched_length
 
 
@@ -667,7 +770,7 @@ class LoRAHiRadixCache(LoRARadixCache):
 
     def _split_node(self, key: LoRAKey, child: LoRATreeNode, split_len: int):
         # child node split into new_node -> child
-        new_node = LoRATreeNode()
+        new_node = LoRATreeNode(cache=self, ignore_holding=False)
         key_split_1 = LoRAKey(lora_id=key.lora_id, token_ids=key.token_ids[:split_len])
         key_split_2 = LoRAKey(lora_id=key.lora_id, token_ids=key.token_ids[split_len:])
         new_node.children = {self.get_child_key_fn(key_split_2): child}
@@ -676,6 +779,7 @@ class LoRAHiRadixCache(LoRARadixCache):
         new_node.key = key_split_1
         new_node.loading = child.loading
         new_node.hit_count = child.hit_count
+        new_node.agents = copy.deepcopy(child.agents)
 
         # split value and host value if exists
         if child.evicted:
@@ -737,12 +841,13 @@ class LoRAHiRadixCache(LoRARadixCache):
                 child_key = self.get_child_key_fn(key)
 
         if len(key):
-            new_node = LoRATreeNode()
+            new_node = LoRATreeNode(cache=self, ignore_holding=False)
             new_node.parent = node
             new_node.key = key
             new_node.value = value
             node.children[child_key] = new_node
             self.evictable_size_ += len(value)
+            new_node.agents = copy.deepcopy(node.agents)
 
             if self.enable_storage:
                 last_hash = node.get_last_hash_value()
@@ -805,3 +910,58 @@ class LoRAHiRadixCache(LoRARadixCache):
         last_host_node.release_host()
         self.cache_controller.append_host_mem_release(host_indices[:completed_tokens])
         self.cache_controller.prefetch_tokens_occupied -= len(token_ids)
+
+    def get_node_chain_status(self, req_last_node: LoRATreeNode):
+        n = req_last_node
+        while n != self.root_node:
+            if n.evicted:
+                logger.warning(f"[status]   evicted id: {n.id}")
+                return self.REQ_IS_EVICTED
+            if n.loading:
+                logger.warning(f"[status]   loading id: {n.id}")
+                return self.REQ_IS_LOADING
+            n = n.parent
+            logger.info(f"\033[91m [status] node id: {n.id}, evicted: {n.evicted}, loading: {n.loading}\033[0m")
+        return self.REQ_IS_READY
+
+    def _update_leaf_node_timestep(self):
+        leaves = self._collect_leaves()
+        logger.warning(f"[leaves][before] {[(leaf.id, leaf.hold_priority) for leaf in leaves]}")
+        update_dict = self.agent_manager.get_update_dict_agent()
+        update_log = []
+        for leaf in leaves:
+            leaf.hold_priority = 1000
+            for agent_id in update_dict.keys():
+                if agent_id in leaf.agents:
+                    leaf.hold_priority = min(leaf.hold_priority, update_dict[agent_id])
+                    update_log.append({"id": leaf.id, "hold_priority": leaf.hold_priority, "agent_id": agent_id, "agent_priority": update_dict[agent_id]})
+        logger.warning(f"[leaves][after] {update_log}")
+        logger.info("[Hold][Update] Leaf node priorities updated.")
+        return
+
+    def hi_pretty_print(self, node: LoRATreeNode, indent: int):
+        """Prints the radix tree in a human-readable format."""
+        stack = [(node, indent)]
+        while stack:
+            current_node, current_indent = stack.pop()
+            if current_node.agents:
+                agents_str = '{' + ', '.join(f'({k}:{v.hit_cnt})' for k, v in current_node.agents.items()) + '}'
+            else:
+                agents_str = '{}'
+            if current_node.evicted:
+                status = "EV"
+            elif current_node.loading:
+                status = "LD"
+            else:
+                status = "RY"
+            logger.warning(
+                f"{' ' * current_indent} ∟ {current_node.id} len={len(current_node.key)} priority={current_node.hold_priority} locref={current_node.lock_ref} status={status} and {agents_str}"
+            )
+            for key, child in current_node.children.items():
+                stack.append((child, current_indent + 2))
+
+                assert key == self.get_child_key_fn(
+                    child.key
+                ), f"{key=}, {self.get_child_key_fn(child.key)=}"
+
+        logger.warning(f"memory: evict={self.evictable_size()}, available={self.token_to_kv_pool_allocator.available_size()}")

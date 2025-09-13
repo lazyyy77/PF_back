@@ -83,10 +83,12 @@ from sglang.srt.managers.io_struct import (
     ProfileReqInput,
     ReleaseMemoryOccupationReqInput,
     ResumeMemoryOccupationReqInput,
+    SelfDebugReq,
     SeparateReasoningReqInput,
     SetInternalStateReq,
     SlowDownReqInput,
     UnloadLoRAAdapterReqInput,
+    UpdateAgentTimestepReq,
     UpdateWeightFromDiskReqInput,
     UpdateWeightsFromDistributedReqInput,
     UpdateWeightsFromTensorReqInput,
@@ -1081,18 +1083,29 @@ async def v1_cancel_responses(response_id: str, raw_request: Request):
     )
 
 @app.post("/v1/update")
-async def v1_update(update_map: dict[str, Any]):
+async def v1_update(obj: UpdateAgentTimestepReq):
     """Update agent priorities via AgentManager"""
     try:
         # Call the tokenizer manager to send update request to scheduler
         if _global_state.tokenizer_manager is not None:
-            logger.info(f"Updating agent timestep with: {update_map}")
-            _global_state.tokenizer_manager.update_agent_timestep(update_map)
+            logger.warning(f"Updating agent timestep with: {obj}")
+            _global_state.tokenizer_manager.update_agent_timestep(obj.agent_data, obj.timestep_data, obj.timestep_cnt)
             return {"status": "success", "message": "Agent timesteps updated successfully"}
         else:
             return {"status": "error", "message": "TokenizerManager not available"}
     except Exception as e:
+        logger.error(f"Exception in v1_update: {e}")
         return {"status": "error", "message": f"Failed to update agent timesteps: {str(e)}"}
+
+@app.post("/v1/debug")
+async def v1_debug(obj: SelfDebugReq):
+    """Debug endpoint to inspect the current state."""
+    try:
+        _global_state.tokenizer_manager.self_debug_request()
+        return {"status": "success", "message": "Debug inject successfully"}
+    except Exception as e:
+        logger.error(f"Exception in v1_debug: {e}")
+        return {"status": "error", "message": f"Debug inject failed: {str(e)}"}
 
 @app.post("/v1/init")
 async def v1_initialize():
@@ -1104,17 +1117,6 @@ async def v1_initialize():
             return {"status": "error", "message": "TokenizerManager not available"}
     except Exception as e:
         return {"status": "error", "message": f"Failed to do initialization: {str(e)}"}
-
-@app.post("/v1/debug")
-async def v1_debug(obj: DebugReq):
-    """Debug endpoint."""
-    try:
-        lora_ids = obj.lora_ids if obj.lora_ids else []
-        _global_state.tokenizer_manager.handle_debug_req(lora_ids)
-        return {"status": "success"}
-    except Exception as e:
-        logger.error(f"Exception in v1_debug: {e}")
-        return {"status": "error", "message": f"Failed to process debug request: {str(e)}"}
 
 @app.api_route(
     "/v1/rerank", methods=["POST", "PUT"], dependencies=[Depends(validate_json_request)]
@@ -1427,15 +1429,14 @@ def _wait_and_warmup(
             return
     else:
         _global_state.tokenizer_manager.server_status = ServerStatus.Up
-    
+
     try:
         url = server_args.url()
         res = requests.post(url + "/v1/init")
         logger.info(f"v1/initialize response: {res.status_code}, {res.text}")
     except Exception as e:
         logger.error(f"Failed to call v1/initialize: {e}")
-     
-    logger.info("The server is fired up and ready to roll!")
+    logger.critical("The server is fired up and ready to roll!")
 
     if pipe_finish_writer is not None:
         pipe_finish_writer.send("ready")

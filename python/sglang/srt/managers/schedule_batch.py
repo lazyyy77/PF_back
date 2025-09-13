@@ -59,6 +59,7 @@ from sglang.srt.mem_cache.allocator import (
 )
 from sglang.srt.mem_cache.base_prefix_cache import BasePrefixCache
 from sglang.srt.mem_cache.chunk_cache import ChunkCache, SWAChunkCache
+from sglang.srt.mem_cache.lora_hiradix_cache import LoRAHiRadixCache
 from sglang.srt.mem_cache.lora_radix_cache import LoRAKey, LoRARadixCache
 from sglang.srt.mem_cache.memory_pool import ReqToTokenPool
 from sglang.srt.mem_cache.swa_radix_cache import SWARadixCache
@@ -618,6 +619,7 @@ class Req:
 
         # For PFEnging
         self.agent_id = agent_id
+        self.is_fetched = False
         
         
     @property
@@ -637,10 +639,11 @@ class Req:
     def init_next_round_input(
         self,
         tree_cache: Optional[BasePrefixCache] = None,
+        enable_hicache: Optional[bool] = False
     ):
         self.fill_ids = self.origin_input_ids + self.output_ids
         if tree_cache is not None:
-            if isinstance(tree_cache, LoRARadixCache):
+            if isinstance(tree_cache, LoRARadixCache) or isinstance(tree_cache, LoRAHiRadixCache):
                 (
                     self.prefix_indices,
                     self.last_node,
@@ -660,6 +663,13 @@ class Req:
                 ) = tree_cache.match_prefix(
                     key=self.adjust_max_prefix_ids(),
                 )
+        elif enable_hicache:
+            # in case last_node is evicted during scheduling, we need to update the prefix_indices
+            while self.last_node.evicted:
+                self.prefix_indices = self.prefix_indices[
+                    : -len(self.last_node.host_value)
+                ]
+                self.last_node = self.last_node.parent
         self.extend_input_len = len(self.fill_ids) - len(self.prefix_indices)
 
     def adjust_max_prefix_ids(self):
