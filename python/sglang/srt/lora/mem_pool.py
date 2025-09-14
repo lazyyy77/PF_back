@@ -124,6 +124,8 @@ class LoRAMemoryPool:
         self.load_lora_stream = torch.cuda.Stream()
         self.stop_lora_event = threading.Event()
         self.load_lora_queue = Queue()
+        
+        self._lora_registry = None
 
         self.load_lora_thread.start()
 
@@ -225,45 +227,74 @@ class LoRAMemoryPool:
                 # Prioritize empty slots
                 if self.buffer_id_to_uid[buffer_id].uid == EMPTY_SLOT:
                     return buffer_id
-            logger.critical("[lora][prefetch]  no enough slot for lora, need to evict")
-            for buffer_id in range(0, self.max_loras_per_batch):
-                slot = self.buffer_id_to_uid[buffer_id]
-                if priority is not None and priority > slot.priority:
-                    continue
-                
-                if slot.uid not in step_lora_ids:
+            logger.info("[lora][prefetch]  no enough slot for lora, need to evict")
+            target_priority, target_buffer_id, target_slot_id = -1, -1, -1
+            try:
+                for buffer_id in range(0, self.max_loras_per_batch):
+                    slot = self.buffer_id_to_uid[buffer_id]
+                    if priority is not None and priority > slot.priority:
+                        continue
+                    if slot.uid in step_lora_ids or slot.pinned is True:
+                        continue
                     if slot.uid is not None:
                         lora_ref = lora_refs.get(slot.uid)
                         if lora_ref is not None and lora_ref.pinned:
                             continue
-                    self.uid_to_buffer_id.pop(slot.uid)
-                    logger.critical(f"[lora][prefetch]  Evicting LoRA {slot.uid} from buffer slot {buffer_id}.")
-                    self.buffer_id_to_uid[buffer_id].uid = EMPTY_SLOT
-                    return buffer_id
-            return -1
+                    if target_priority < slot.priority:
+                        target_priority = slot.priority
+                        target_buffer_id = buffer_id
+                        target_slot_id = slot.uid
+                    
+                    # name = self._lora_registry.get(slot.uid, slot.uid) if self._lora_registry else slot.uid                
+                    # if slot.uid not in step_lora_ids:
+                    #     if slot.uid is not None:
+                    #         lora_ref = lora_refs.get(slot.uid)
+                    #         if lora_ref is not None and lora_ref.pinned:
+                    #             continue
+                    #     self.uid_to_buffer_id.pop(slot.uid)
+                    #     logger.critical(f"[lora][prefetch]  Evicting LoRA {name} from buffer slot {buffer_id}.")
+                    #     self.buffer_id_to_uid[buffer_id].uid = EMPTY_SLOT
+                    #     return buffer_id
+                
+                if target_slot_id != -1:
+                    self.uid_to_buffer_id.pop(target_slot_id)
+                    name = self._lora_registry.get(target_slot_id) if self._lora_registry else target_slot_id
+                    logger.critical(f"[lora][prefetch]  Evicting LoRA {name} from buffer slot {target_buffer_id}.")
+                    self.buffer_id_to_uid[target_buffer_id].uid = EMPTY_SLOT
+                    return target_buffer_id
 
-        if lora_id not in self.uid_to_buffer_id:
-            buffer_id = get_available_buffer_slot()
-            if buffer_id == -1:
-                logger.critical(f"[lora][prefetch]  no available slot for prefetching LoRA {lora_id} now.")
-                return False
-            logger.critical(f"[lora][prefetch]  Assigning LoRA {lora_id} to slot {buffer_id}")
-            lora_adapter = lora_adapters.get(lora_id, None)
-            operation = LoRAOperation(uid=lora_id, buffer_id=buffer_id, lora_adapter=lora_adapter, lora_modules=lora_modules, priority=priority)
-            try:
-                self.load_lora_queue.put(operation, block=False)
-                self.uid_to_buffer_id[lora_id] = buffer_id
-                self.buffer_id_to_uid[buffer_id].uid = lora_id
+                return -1
+            except Exception as e:
+                logger.error(f"[lora][prefetch][Evict]  Error during eviction: {e}")
+                return -1
+
+        try:
+            if lora_id not in self.uid_to_buffer_id:
+                buffer_id = get_available_buffer_slot()
+                name = self._lora_registry.get(lora_id, lora_id) if self._lora_registry else lora_id
+                if buffer_id == -1:
+                    logger.critical(f"[lora][prefetch]  no available slot for prefetching LoRA {name} now.")
+                    return False
+                logger.critical(f"[lora][prefetch]  Assigning LoRA {name} to slot {buffer_id}")
+                lora_adapter = lora_adapters.get(lora_id, None)
+                operation = LoRAOperation(uid=lora_id, buffer_id=buffer_id, lora_adapter=lora_adapter, lora_modules=lora_modules, priority=priority)
+                try:
+                    self.load_lora_queue.put(operation, block=False)
+                    self.uid_to_buffer_id[lora_id] = buffer_id
+                    self.buffer_id_to_uid[buffer_id].uid = lora_id
+                    self.buffer_id_to_uid[buffer_id].priority = priority
+                    self.buffer_id_to_uid[buffer_id].status = BufferSlot.LOADING
+                except Full:
+                    logger.critical(f"[lora][prefetch]  Load queue is full, cannot prefetch LoRA {name} now.")
+                    return False
+            else:
+                buffer_id = self.uid_to_buffer_id[lora_id]
                 self.buffer_id_to_uid[buffer_id].priority = priority
-                self.buffer_id_to_uid[buffer_id].status = BufferSlot.LOADING
-            except Full:
-                logger.critical(f"[lora][prefetch]  Load queue is full, cannot prefetch LoRA {lora_id} now.")
-                return False
-        else:
-            buffer_id = self.uid_to_buffer_id[lora_id]
-            self.buffer_id_to_uid[buffer_id].priority = priority
         
-        return True
+            return True
+        except Exception as e:
+            logger.error(f"[lora][prefetch]  Error during prefetching LoRA {lora_id}: {e}")
+            return False
 
     def prepare_lora_batch(
         self,
@@ -274,62 +305,75 @@ class LoRAMemoryPool:
     ):
         def get_available_buffer_slot():
             for buffer_id in range(self.max_loras_per_batch):
-                # Prioritize empty slots
                 if self.buffer_id_to_uid[buffer_id].uid == EMPTY_SLOT:
                     return buffer_id
             logger.critical("[lora][prepare]  no enough slot for lora, need to evict")
-            for buffer_id in range(0, self.max_loras_per_batch):
-                if self.buffer_id_to_uid[buffer_id].pinned:
-                    continue
-                uid = self.buffer_id_to_uid[buffer_id].uid
-
-                # Evict unneeded lora
-                if uid not in cur_uids:
-                    # Skip pinned LoRAs
-                    # TODO (lifuhuang): we might consider supporting pinning base model (uid == None) in the future.
-                    if uid is not None:
-                        lora_ref = lora_refs.get(uid)
+            target_priority, target_buffer_id, target_slot_id = -1, -1, -1
+            try:
+                for buffer_id in range(0, self.max_loras_per_batch):
+                    slot = self.buffer_id_to_uid[buffer_id]
+                    if slot.pinned is True or slot.uid in cur_uids:
+                        continue
+                    if slot.uid is not None:
+                        lora_ref = lora_refs.get(slot.uid)
                         if lora_ref is not None and lora_ref.pinned:
                             continue
+                    if target_priority < slot.priority:
+                        target_priority = slot.priority
+                        target_buffer_id = buffer_id
+                        target_slot_id = slot.uid
+                        
+                if target_slot_id != -1:
+                    self.uid_to_buffer_id.pop(target_slot_id)
+                    name = self._lora_registry.get(target_slot_id) if self._lora_registry else target_slot_id
+                    logger.critical(f"[lora][prepare]  Evicting LoRA {name} from buffer slot {target_buffer_id}.")
+                    self.buffer_id_to_uid[target_buffer_id].uid = EMPTY_SLOT
+                    return target_buffer_id
+                
+                raise ValueError("No available buffer slots found after eviction attempt.")
+            except Exception as e:
+                logger.error(f"[lora][prepare][Evict]  Error during eviction: {e}")
+                return -1
 
-                    self.uid_to_buffer_id.pop(uid)
-                    logger.critical(f"[lora][prepare]  Evicting LoRA {uid} from buffer slot {buffer_id}.")
-                    self.buffer_id_to_uid[buffer_id].uid = EMPTY_SLOT
-                    return buffer_id
-
-            raise ValueError(
-                "No available buffer slots found. Please ensure the number of active loras is less than max_loras_per_batch."
-            )
-        for uid in cur_uids:
-            if uid not in self.uid_to_buffer_id:
-                buffer_id = get_available_buffer_slot()
-                logger.critical(f"[lora][prepare]  Assigning LoRA {uid} to slot {buffer_id}")
-                lora_adapter = lora_adapters.get(uid, None)
-                t1 = time.perf_counter()
-                self.load_lora_weight_to_buffer(
-                    uid, buffer_id, lora_adapter, lora_modules
-                )
-                # operation = LoRAOperation(uid=uid, buffer_id=buffer_id, lora_adapter=lora_adapter, lora_modules=lora_modules)
-                # self.load_lora_queue.put(operation)
-
-                # if uid is None:
-                #     self.buffer_id_to_uid[buffer_id].pinned = True
-                #     logger.critical(f"[SYP][lora][pinned]  Loaded base model to slot {buffer_id}")
-                    
-                self.uid_to_buffer_id[uid] = buffer_id
-                self.buffer_id_to_uid[buffer_id].uid = uid
-                t2 = time.perf_counter()
-                logger.critical(f"\033[91m [lora][prepare][Immediate]  Loaded LoRA {uid} in {t2 - t1:.6f} seconds\033[0m")
-        break_flag = False
-        while break_flag == False:
+        try:
             for uid in cur_uids:
-                buffer_id = self.uid_to_buffer_id[uid]
-                if self.buffer_id_to_uid[buffer_id].status == BufferSlot.LOADING:
-                    time.sleep(0.001)
-                else:
-                    break_flag = True
-                    break
-        # logger.debug("All LoRAs are ready.")
+                if uid not in self.uid_to_buffer_id:
+                    buffer_id = get_available_buffer_slot()
+                    name = self._lora_registry.get(uid, uid) if self._lora_registry else uid
+                    logger.critical(f"[lora][prepare]  Assigning LoRA {name} to slot {buffer_id}")
+                    lora_adapter = lora_adapters.get(uid, None)
+                    t1 = time.perf_counter()
+                    self.load_lora_weight_to_buffer(
+                        uid, buffer_id, lora_adapter, lora_modules
+                    )
+                    # operation = LoRAOperation(uid=uid, buffer_id=buffer_id, lora_adapter=lora_adapter, lora_modules=lora_modules)
+                    # self.load_lora_queue.put(operation)
+                    # if uid is None:
+                    #     self.buffer_id_to_uid[buffer_id].pinned = True
+                    #     logger.critical(f"[SYP][lora][pinned]  Loaded base model to slot {buffer_id}")
+
+                    if name == "lora0":
+                        self.buffer_id_to_uid[buffer_id].pinned = True
+                        logger.critical(f"[lora][pinned]  lora0 = none-agent-lora is pinned to slot {buffer_id}")
+                        
+                    self.uid_to_buffer_id[uid] = buffer_id
+                    self.buffer_id_to_uid[buffer_id].uid = uid
+                    self.buffer_id_to_uid[buffer_id].priority = 0
+                    self.buffer_id_to_uid[buffer_id].status = BufferSlot.READY
+                    t2 = time.perf_counter()
+                    logger.critical(f"\033[91m [lora][prepare][Immediate]  Loaded LoRA {name} in {t2 - t1:.6f} seconds\033[0m")
+            break_flag = False
+            while break_flag == False:
+                for uid in cur_uids:
+                    buffer_id = self.uid_to_buffer_id[uid]
+                    if self.buffer_id_to_uid[buffer_id].status == BufferSlot.LOADING:
+                        time.sleep(0.001)
+                    else:
+                        break_flag = True
+                        break
+            # logger.debug("All LoRAs are ready.")
+        except Exception as e:
+            logger.error(f"[lora][prepare]  Error during preparing LoRA batch: {e}")
 
     def load_lora_weight_to_buffer(
         self,
@@ -431,17 +475,25 @@ class LoRAMemoryPool:
                             operation.lora_modules,
                         )
                         self.buffer_id_to_uid[operation.buffer_id].status = BufferSlot.READY
-                        logger.warning(f"\033[94m [lora][prefetch][finish]  LoRA {operation.uid} is ready in slot {operation.buffer_id} \033[0m")
+                        name = self._lora_registry.get(operation.uid, operation.uid) if self._lora_registry else operation.uid
+                        logger.warning(f"\033[94m [lora][prefetch][finish]  LoRA {name} is ready in slot {operation.buffer_id} \033[0m")
                 except Exception as e:
                     print(f"[SYP][lora]  Error loading LoRA: {e}")
                 
     def update_lora_priority(self):
         for buffer_id in range(self.max_loras_per_batch):
             slot = self.buffer_id_to_uid[buffer_id]
-            if slot.uid is EMPTY_SLOT:
-                slot.priority = 1000
-            if slot.uid is not EMPTY_SLOT and slot.status == BufferSlot.READY:
-                slot.priority -= 1
-                if slot.priority < 0:
-                    slot.priority = 1000
+            slot.priority = 1000
+            # if slot.uid is EMPTY_SLOT:
+            #     slot.priority = 1000
+            # if slot.uid is not EMPTY_SLOT and slot.status == BufferSlot.READY:
+            #     slot.priority -= 1
+            #     if slot.priority < 0:
+            #         slot.priority = 1000
             
+    def print_buffer_status(self):
+        buffer = []
+        for i in range(len(self.buffer_id_to_uid)):
+            slot = self.buffer_id_to_uid[i]
+            buffer.append(f"{i}:{self._lora_registry[slot.uid]}, p={slot.priority}, s={slot.status}, pin={slot.pinned}")
+        logger.critical(f"[lora][status]  LoRA buffer status: {buffer}")

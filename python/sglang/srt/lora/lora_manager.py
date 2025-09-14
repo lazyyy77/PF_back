@@ -235,7 +235,8 @@ class LoRAManager:
         """
         Prefetch LoRA weights from CPU to GPU memory for the given LoRA name.
         """
-        logger.info(f"\033[94m [lora][Prefetch] \033[0m    Try to prefetch LoRA adapter weights: {lora_id} with priority {priority}, step_lora_ids: {step_lora_ids}")
+        lora_name = self.memory_pool._lora_registry.get(lora_id, lora_id) if self.memory_pool._lora_registry else lora_id
+        logger.info(f"\033[94m [lora][Prefetch] \033[0m    Try to prefetch LoRA adapter weights: {lora_name} with priority {priority}, step_lora_ids: {step_lora_ids}")
         success = self.memory_pool.prefetch_lora_weights(
             lora_id=lora_id,
             priority=priority,
@@ -250,7 +251,10 @@ class LoRAManager:
 
         # Load active loras into lora memory pool
         cur_uids = set(forward_batch.lora_ids)
-        logger.info(f"\033[94m [lora][Prepare]\033[0m Preparing LoRA batch with LoRA IDs: {cur_uids}")
+        cur_names = []
+        for id in forward_batch.lora_ids:
+            cur_names.append(self.memory_pool._lora_registry.get(id, id) if self.memory_pool._lora_registry else id)
+        logger.info(f"\033[94m [lora][Prepare]\033[0m Preparing LoRA batch with LoRA IDs: {cur_names}")
         assert len(cur_uids) <= self.max_loras_per_batch
         self.memory_pool.prepare_lora_batch(
             cur_uids=cur_uids,

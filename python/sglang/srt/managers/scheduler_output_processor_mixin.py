@@ -50,6 +50,10 @@ class SchedulerOutputProcessorMixin:
                 result.extend_logprob_start_len_per_req,
             )
 
+            if extend_input_len_per_req is not None:
+                # logger.warning(f"\033[95m[Prefill] {extend_input_len_per_req}\033[0m")
+                self.prefill_token_count += sum(extend_input_len_per_req)
+
             if self.enable_overlap:
                 logits_output, next_token_ids, _ = (
                     self.tp_worker.resolve_last_batch_result(launch_done)
@@ -209,6 +213,11 @@ class SchedulerOutputProcessorMixin:
             result.can_run_cuda_graph,
         )
         self.num_generated_tokens += len(batch.reqs)
+        
+        if next_token_ids is not None:
+            # logger.warning(f"\033[95m[Decode] {next_token_ids}\033[0m")
+            self.decode_token_count += len(next_token_ids)
+
 
         if self.enable_overlap:
             logits_output, next_token_ids, can_run_cuda_graph = (
@@ -729,76 +738,96 @@ class SchedulerOutputProcessorMixin:
 
     def prefetch_agent_timestep(self, prefetch_step: Optional[int] = None):
         self.tree_cache.cache_controller._clear_outdated_operations(2)
+        self.lora_manager.memory_pool.update_lora_priority()
+        self.prefetch_agent = set()
+        self.prefetch_lora = set()
         print("_clear right")
         self.tree_cache.check_hicache_events()
         if self.agent_manager.update_dict_timestep is None:
             logger.warning("\033[91m update_dict_timestep is None\033[0m")
             return
         p_step = prefetch_step if prefetch_step is not None else self.agent_manager.prefetch_step
-        for step in range(1, p_step+1):
-            last_nodes = []
-            agent_ids = self.agent_manager.update_dict_timestep.get(step, [])
-            # TODO: 1. add agent-up-bound-memory    2. strategy of prefetch within different agent priority
-            if agent_ids is None or len(agent_ids) == 0:
-                logger.info("\033[95m[Prefetch] step: %s, no agent_ids found\033[0m", step)
-                continue
-            agent_prefetch_statistic = {}
-            for agent_id in agent_ids:
-                to_break = False
-                last_nodes = self.agent_manager.agent_to_last_nodes.get(agent_id, [])
-                # 确保 last_nodes 不为 None
-                if last_nodes is None or len(last_nodes) == 0:
-                    logger.info("\033[95m[Prefetch] step: %s, agent_id: %s, no last_nodes found\033[0m", step, agent_id)
+        lora_names = []
+        lora_names.append("lora0")
+        self.prefetch_lora.add("lora0")
+        try:
+            for step in range(0, p_step+1):
+                last_nodes = []
+                agent_ids = self.agent_manager.update_dict_timestep.get(step, [])
+                # TODO: 1. add agent-up-bound-memory    2. strategy of prefetch within different agent priority
+                if agent_ids is None or len(agent_ids) == 0:
+                    logger.info("\033[95m [Prefetch] step: %s, no agent_ids found\033[0m", step)
                     continue
-                last_nodes_list = [(getattr(node, "id", None), node.evicted) for node in last_nodes]
-                logger.info(
-                    "\033[95m[Prefetch] step: %s, agent_id: %s, last_nodes: %s\033[0m",
-                    step,
-                    agent_id,
-                    last_nodes_list
-                )
-                nodes_to_load = []
-                nodes_to_load_pri = []
-                if len(last_nodes) == 0:
-                    continue
-                for node in last_nodes:
-                    n = node
-                    if n.evicted and not n.loading:
-                        dv_indices = self.tree_cache.load_back(n, priority=step+1, check_reserve=True)
-                        if dv_indices is None:
-                            to_break = True
-                        elif agent_id not in agent_prefetch_statistic:
-                            agent_prefetch_statistic[agent_id] = len(dv_indices)
-                        else:
-                            agent_prefetch_statistic[agent_id] += len(dv_indices)
-
-                    # bug = False
-                    # while n != self.tree_cache.root_node:
-                    #     if n.evicted and not n.loading:
-                    #         if bug == True:
-                    #             logger.error(f"[Load back][Node][bug]   node {n.id}, evicted {n.evicted}, loading {n.loading}")
-                    #             nodes_to_load_pri.append(n)
-                    #         else:
-                    #             nodes_to_load.append(n)
-                    #     else:
-                    #         bug = True
-                    #     n = n.parent
-                    # if len(nodes_to_load) == 0:
+                for agent_id in agent_ids:
+                    lora_names.append(f"lora{agent_id}" if int(agent_id) > 0 else "lora0")
+                logger.warning(f"[Prefetch] step: {step}, agent_ids: {agent_ids}, lora_names: {lora_names}")
+                agent_prefetch_statistic = {}
+                
+                for agent_id in agent_ids:
+                    to_break = False
+                    if int(agent_id) >= 0:
+                        lora_name = f"lora{agent_id}"
+                    else:
+                        lora_name = "None"
+                    to_break = not self.prefetch_lora_timesteps(lora_name, priority=step, step_lora_names=lora_names)
+                    if not to_break:
+                        agent_prefetch_statistic[agent_id] = True
+                        self.prefetch_lora.add(lora_name)
+                    # last_nodes = self.agent_manager.agent_to_last_nodes.get(agent_id, [])
+                    # # 确保 last_nodes 不为 None
+                    # if last_nodes is None or len(last_nodes) == 0:
+                    #     logger.info("\033[95m[Prefetch] step: %s, agent_id: %s, no last_nodes found\033[0m", step, agent_id)
                     #     continue
-                    # for n in reversed(nodes_to_load_pri):
-                    #     dv_indices = self.tree_cache.load_back_node(n, priority=1)
-                    # for n in reversed(nodes_to_load):
-                    #     dv_indices = self.tree_cache.load_back_node(n, priority=step+1)
-                    #     if dv_indices is None:
-                    #         to_break = True
+                    # last_nodes_list = [(getattr(node, "id", None), node.evicted) for node in last_nodes]
+                    # logger.info(
+                    #     "\033[95m[Prefetch] step: %s, agent_id: %s, last_nodes: %s\033[0m",
+                    #     step,
+                    #     agent_id,
+                    #     last_nodes_list
+                    # )
+                    # nodes_to_load = []
+                    # nodes_to_load_pri = []
+                    # if len(last_nodes) == 0:
+                    #     continue
+                    # for node in last_nodes:
+                    #     n = node
+                    #     if n.evicted and not n.loading:
+                    #         dv_indices = self.tree_cache.load_back(n, priority=step+1, check_reserve=True)
+                    #         if dv_indices is None:
+                    #             to_break = True
+                    #         elif agent_id not in agent_prefetch_statistic:
+                    #             agent_prefetch_statistic[agent_id] = len(dv_indices)
+                    #         else:
+                    #             agent_prefetch_statistic[agent_id] += len(dv_indices)
+
+                    #     # bug = False
+                    #     # while n != self.tree_cache.root_node:
+                    #     #     if n.evicted and not n.loading:
+                    #     #         if bug == True:
+                    #     #             logger.error(f"[Load back][Node][bug]   node {n.id}, evicted {n.evicted}, loading {n.loading}")
+                    #     #             nodes_to_load_pri.append(n)
+                    #     #         else:
+                    #     #             nodes_to_load.append(n)
+                    #     #     else:
+                    #     #         bug = True
+                    #     #     n = n.parent
+                    #     # if len(nodes_to_load) == 0:
+                    #     #     continue
+                    #     # for n in reversed(nodes_to_load_pri):
+                    #     #     dv_indices = self.tree_cache.load_back_node(n, priority=1)
+                    #     # for n in reversed(nodes_to_load):
+                    #     #     dv_indices = self.tree_cache.load_back_node(n, priority=step+1)
+                    #     #     if dv_indices is None:
+                    #     #         to_break = True
+                    #     #         break
+                        
+                    #     if to_break:
                     #         break
-                    
-                    if to_break:
-                        break
 
-                self.tree_cache.load_cache_event.set()
+                    # self.tree_cache.load_cache_event.set()
 
-                logger.warning(f"[pf = {step}], with each agent prefetch situation: {agent_prefetch_statistic}")
-            if to_break:
-                break
-
+                    logger.warning(f"[pf = {step}], with each agent prefetch situation: {agent_prefetch_statistic}")
+                if to_break:
+                    break
+        except Exception as e:
+            logger.error(f"\033[91m[Prefetch] Exception: {e}\033[0m")
