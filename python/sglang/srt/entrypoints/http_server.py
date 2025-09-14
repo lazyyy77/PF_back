@@ -1087,7 +1087,7 @@ async def v1_update(obj: UpdateAgentTimestepReq):
     try:
         # Call the tokenizer manager to send update request to scheduler
         if _global_state.tokenizer_manager is not None:
-            logger.warning(f"Updating agent timestep with: {obj}")
+            logger.debug(f"Updating agent timestep with: {obj}")
             _global_state.tokenizer_manager.update_agent_timestep(obj.agent_data, obj.timestep_data, obj.timestep_cnt)
             return {"status": "success", "message": "Agent timesteps updated successfully"}
         else:

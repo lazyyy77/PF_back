@@ -918,7 +918,7 @@ class HiRadixCache(RadixCache):
 
     def _update_leaf_node_timestep(self):
         leaves = self._collect_leaves()
-        logger.warning(f"[leaves][before] {[(leaf.id, leaf.hold_priority) for leaf in leaves]}")
+        logger.debug(f"[leaves][before] {[(leaf.id, leaf.hold_priority) for leaf in leaves]}")
         update_dict = self.agent_manager.get_update_dict_agent()
         update_log = []
         for leaf in leaves:
@@ -927,7 +927,7 @@ class HiRadixCache(RadixCache):
                 if agent_id in leaf.agents:
                     leaf.hold_priority = min(leaf.hold_priority, update_dict[agent_id])
                     update_log.append({"id": leaf.id, "hold_priority": leaf.hold_priority, "agent_id": agent_id, "agent_priority": update_dict[agent_id]})
-        logger.warning(f"[leaves][after] {update_log}")
+        logger.debug(f"[leaves][after] {update_log}")
         logger.info("[Hold][Update] Leaf node priorities updated.")
         return
 

@@ -259,21 +259,22 @@ class Scheduler(
             )
         )
 
-
-        # PFEngine
-        self.lora_registry: Dict[str, str] = dict()
-
         # Init model config
         self.model_config = ModelConfig.from_server_args(server_args)
 
         # For PFEngine
+        self.lora_registry: Dict[str, str] = dict()
         self.agent_manager = AgentManager(self.server_args.evict_pri_level, self.server_args.load_ahead_step)
         self.last_update_time = time.time()
         self.last_batch_start_time = time.time()
         self.last_batch_end_time = time.time()
         self.last_batch_id = 0
         self.batch_per_timestep = 0
-
+        self.prefill_token_count = 0
+        self.decode_token_count = 0
+        self.activate_agent = set()
+        self.prefetch_agent = set()
+        self.prefetch_lora = set()
 
         # Init inter-process communication
         context = zmq.Context(2)
@@ -589,8 +590,6 @@ class Scheduler(
             assert dp_balance_meta is not None
 
         self.recv_dp_balance_id_this_term = []
-        
-        # PF
 
     def init_tokenizer(self):
         server_args = self.server_args
@@ -1762,6 +1761,8 @@ class Scheduler(
         # Get requests from the waiting queue to a new prefill batch
         for req in self.waiting_queue:
 
+            self.activate_agent.add(req.agent_id)
+            
             if self.enable_lora and not self.tp_worker.can_run_lora_batch(
                 lora_set
                 | set([req.lora_id for req in adder.can_run_list])
@@ -2709,6 +2710,7 @@ class Scheduler(
         """Update the LoRA adapter registry and forward to detokenizer."""
         try:
             self.lora_registry = recv_req.update_registry_dict
+            self.lora_manager.memory_pool._lora_registry = {v: k for k, v in self.lora_registry.items()}
             logger.info(f"\033[94m [Lora][Updated]\033[0m    Updated LoRA registry: {self.lora_registry}")
         except Exception as e:
             logger.error(f"Failed to update LoRA registry: {e}")
@@ -2736,6 +2738,7 @@ class Scheduler(
             logger.info("[Init] Scheduler cache flushed successfully on init request!")
             if recv_req.update_registry_dict:
                 self.lora_registry = recv_req.update_registry_dict
+                self.lora_manager.memory_pool._lora_registry = {v: k for k, v in self.lora_registry.items()}
                 logger.info(f"[Init][Lora][Updated] Initialized LoRA registry: {self.lora_registry}")
         except Exception as e:
             logger.error(f"Failed to handle init request: {e}")
@@ -2747,22 +2750,28 @@ class Scheduler(
                 if recv_req is None:
                     logger.error("Received None for agent timestep update request")
                     return
-                print(f"Received agent timestep update request: {recv_req.agent_data}, {recv_req.timestep_data}, {recv_req.timestep_cnt}")
+                # print(f"Received agent timestep update request: {recv_req.agent_data}, {recv_req.timestep_data}, {recv_req.timestep_cnt}")
                 self.agent_manager.update_agent_timestep(recv_req.agent_data, recv_req.timestep_data)
                 self.tree_cache._update_leaf_node_timestep()
-                if self.server_args.enable_hierarchical_cache:
-                    self.tree_cache.hi_pretty_print(node=self.tree_cache.root_node, indent=0)
-                else:
-                    self.tree_cache.pretty_print()
+                # if self.server_args.enable_hierarchical_cache:
+                #     self.tree_cache.hi_pretty_print(node=self.tree_cache.root_node, indent=0)
+                # else:
+                #     self.tree_cache.pretty_print()
+                logger.critical(f"\033[94m UPDATE \033[0m: Activate Agent: {self.activate_agent}, Prefetch Agent: {self.prefetch_agent}, Prefetch LoRA: {self.prefetch_lora}")
                 if not self.server_args.disable_prefetch:
                     self.prefetch_agent_timestep(prefetch_step=self.server_args.load_ahead_step)
                 last_update_time = self.last_update_time
                 end_time = time.time()                
                 lasting_time = end_time - last_update_time
-                logger.critical(f"\033[94mUPDATE\033[0m:   [{lasting_time:.3f}s][{recv_req.timestep_cnt} ts][{self.batch_per_timestep} batch] Updated timestep data: {recv_req.timestep_data}, Updated agent data: {recv_req.agent_data} evict: {self.tree_cache.evictable_size()}")
+                self.lora_manager.memory_pool.print_buffer_status()
+                # logger.critical(f"\033[94m UPDATE \033[0m: Prefill Token: {self.prefill_token_count}, Decode Token: {self.decode_token_count}, rate = {self.decode_token_count / self.prefill_token_count}")                
+                logger.critical(f"\033[94m UPDATE \033[0m:   [{lasting_time:.3f}s][{recv_req.timestep_cnt} ts][{self.batch_per_timestep} batch] Updated timestep data: {recv_req.timestep_data}, Updated agent data: {recv_req.agent_data} evict: {self.tree_cache.evictable_size()}")
                 logger.critical(f"Memory stats: {self.token_to_kv_pool_allocator.get_memory_stats()}, page size: {self.token_to_kv_pool_allocator.page_size}")
                 logger.critical("==="*10)
                 self.batch_per_timestep = 0
+                self.prefill_token_count = 0
+                self.decode_token_count = 0
+                self.activate_agent = set()
                 self.last_update_time = time.time()
             except Exception as e:
                 logger.error(f"Failed to update agent timesteps: {e}")
