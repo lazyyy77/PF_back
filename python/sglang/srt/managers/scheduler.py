@@ -1675,6 +1675,11 @@ class Scheduler(
                 self.handle_dp_balance_data(ret)
             ret = self.prepare_mlp_sync_batch(ret)
 
+        if ret is not None and ret.reqs is not None:
+            for req in ret.reqs:
+                if req.agent_id is not None:
+                    self.activate_agent.add(req.agent_id)
+
         return ret
 
     def get_num_allocatable_reqs(self, running_bs):
@@ -1760,8 +1765,6 @@ class Scheduler(
 
         # Get requests from the waiting queue to a new prefill batch
         for req in self.waiting_queue:
-
-            self.activate_agent.add(req.agent_id)
             
             if self.enable_lora and not self.tp_worker.can_run_lora_batch(
                 lora_set
@@ -1816,6 +1819,9 @@ class Scheduler(
                     else:
                         self.running_batch.batch_is_full = True
                 break
+
+            # self.activate_agent.add(req.agent_id)
+
 
         # Update waiting queue
         can_run_list: List[Req] = adder.can_run_list
@@ -1880,6 +1886,9 @@ class Scheduler(
             )
         else:
             new_batch.decoding_reqs = None
+
+        # for req in new_batch.reqs:
+            # self.activate_agent.add(req.agent_id)
 
         return new_batch
 
@@ -1972,6 +1981,10 @@ class Scheduler(
             # These 2 values are needed for processing the output, but the values can be
             # modified by overlap schedule. So we have to copy them here so that
             # we can use the correct values in output processing.
+            # if batch.forward_mode.is_extend():
+            #     current_extend_token = sum(extend_input_len_per_req)
+            #     self.prefill_token_count += current_extend_token
+            #     logger.critical(f"[Prefill] {current_extend_token}")
             if batch.return_logprob or self.spec_algorithm.is_eagle():
                 extend_input_len_per_req = [req.extend_input_len for req in batch.reqs]
             else:
@@ -1982,6 +1995,8 @@ class Scheduler(
                 ]
             else:
                 extend_logprob_start_len_per_req = None
+
+            extend_input_len_per_req = [req.extend_input_len for req in batch.reqs]
 
             ret = GenerationBatchResult(
                 logits_output=logits_output if self.pp_group.is_last_rank else None,
@@ -2763,8 +2778,9 @@ class Scheduler(
                 last_update_time = self.last_update_time
                 end_time = time.time()                
                 lasting_time = end_time - last_update_time
-                self.lora_manager.memory_pool.print_buffer_status()
-                # logger.critical(f"\033[94m UPDATE \033[0m: Prefill Token: {self.prefill_token_count}, Decode Token: {self.decode_token_count}, rate = {self.decode_token_count / self.prefill_token_count}")                
+                # self.lora_manager.memory_pool.print_buffer_status()
+                rate = self.decode_token_count / self.prefill_token_count if self.prefill_token_count > 0 else -1
+                logger.critical(f"\033[94m UPDATE \033[0m: Prefill Token: {self.prefill_token_count}, Decode Token: {self.decode_token_count}, rate = {rate}")
                 logger.critical(f"\033[94m UPDATE \033[0m:   [{lasting_time:.3f}s][{recv_req.timestep_cnt} ts][{self.batch_per_timestep} batch] Updated timestep data: {recv_req.timestep_data}, Updated agent data: {recv_req.agent_data} evict: {self.tree_cache.evictable_size()}")
                 logger.critical(f"Memory stats: {self.token_to_kv_pool_allocator.get_memory_stats()}, page size: {self.token_to_kv_pool_allocator.page_size}")
                 logger.critical("==="*10)
