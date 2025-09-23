@@ -50,8 +50,9 @@ class SchedulerOutputProcessorMixin:
                 result.extend_logprob_start_len_per_req,
             )
 
+            # logger.critical(f"\033[95m[Prefill] {extend_input_len_per_req} next {next_token_ids} logprob {extend_logprob_start_len_per_req}\033[0m")
             if extend_input_len_per_req is not None:
-                # logger.warning(f"\033[95m[Prefill] {extend_input_len_per_req}\033[0m")
+                logger.debug(f"\033[95m[Prefill] {extend_input_len_per_req}\033[0m")
                 self.prefill_token_count += sum(extend_input_len_per_req)
 
             if self.enable_overlap:
@@ -213,9 +214,10 @@ class SchedulerOutputProcessorMixin:
             result.can_run_cuda_graph,
         )
         self.num_generated_tokens += len(batch.reqs)
-        
+
+        # logger.warning(f"\033[95m[Decode] {next_token_ids}\033[0m")
         if next_token_ids is not None:
-            # logger.warning(f"\033[95m[Decode] {next_token_ids}\033[0m")
+            logger.debug(f"\033[95m[Decode] {next_token_ids}\033[0m")
             self.decode_token_count += len(next_token_ids)
 
 
@@ -260,6 +262,7 @@ class SchedulerOutputProcessorMixin:
             req.check_finished()
             if req.finished():
                 self.tree_cache.cache_finished_req(req)
+                self.tree_cache._update_leaf_node_priority(req, req.last_node)
                 req.time_stats.completion_time = time.time()
 
             if req.return_logprob and batch.spec_algorithm.is_none():
@@ -741,7 +744,6 @@ class SchedulerOutputProcessorMixin:
         self.lora_manager.memory_pool.update_lora_priority()
         self.prefetch_agent = set()
         self.prefetch_lora = set()
-        print("_clear right")
         self.tree_cache.check_hicache_events()
         if self.agent_manager.update_dict_timestep is None:
             logger.warning("\033[91m update_dict_timestep is None\033[0m")
@@ -752,27 +754,30 @@ class SchedulerOutputProcessorMixin:
         self.prefetch_lora.add("lora0")
         try:
             for step in range(0, p_step+1):
+                print(f"\033[95m[Prefetch] step: {step}\033[0m")
                 last_nodes = []
                 agent_ids = self.agent_manager.update_dict_timestep.get(step, [])
                 # TODO: 1. add agent-up-bound-memory    2. strategy of prefetch within different agent priority
                 if agent_ids is None or len(agent_ids) == 0:
-                    logger.info("\033[95m [Prefetch] step: %s, no agent_ids found\033[0m", step)
+                    logger.critical("\033[95m [Prefetch] step: %s, no agent_ids found\033[0m", step)
                     continue
-                for agent_id in agent_ids:
-                    lora_names.append(f"lora{agent_id}" if int(agent_id) > 0 else "lora0")
-                logger.warning(f"[Prefetch] step: {step}, agent_ids: {agent_ids}, lora_names: {lora_names}")
+                # for agent_id in agent_ids:
+                    # lora_names.append(f"lora{agent_id}" if int(agent_id) > 0 else "lora0")
+                # logger.warning(f"[Prefetch] step: {step}, agent_ids: {agent_ids}, lora_names: {lora_names}")
                 agent_prefetch_statistic = {}
                 
                 for agent_id in agent_ids:
                     to_break = False
-                    if int(agent_id) >= 0:
-                        lora_name = f"lora{agent_id}"
-                    else:
-                        lora_name = "None"
-                    to_break = not self.prefetch_lora_timesteps(lora_name, priority=step, step_lora_names=lora_names)
-                    if not to_break:
-                        agent_prefetch_statistic[agent_id] = True
-                        self.prefetch_lora.add(lora_name)
+                    # if int(agent_id) >= 0:
+                        # lora_name = f"lora{agent_id}"
+                    # else:
+                        # lora_name = "None"
+                    # lora_name = "lora0"
+                    # to_break = not self.prefetch_lora_timesteps(lora_name, priority=step, step_lora_names=lora_names)
+                    # if not to_break:
+                        # agent_prefetch_statistic[agent_id] = True
+                        # self.prefetch_lora.add(lora_name)
+
                     # last_nodes = self.agent_manager.agent_to_last_nodes.get(agent_id, [])
                     # # 确保 last_nodes 不为 None
                     # if last_nodes is None or len(last_nodes) == 0:

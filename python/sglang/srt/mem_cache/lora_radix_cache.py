@@ -592,8 +592,8 @@ class LoRARadixCache(BasePrefixCache):
             
         current_last_nodes = self.agent_manager.agent_to_last_nodes[agent_id]
         n = last_node
-        if(n == self.root_node):
-            print("damn here's the bug")
+        # if(n == self.root_node):
+        #     print("damn here's the bug")
         while n != self.root_node:
             if n in current_last_nodes and n != last_node:
                 current_last_nodes.remove(n)
