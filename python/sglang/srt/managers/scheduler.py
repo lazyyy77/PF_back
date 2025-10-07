@@ -266,15 +266,45 @@ class Scheduler(
         self.lora_registry: Dict[str, str] = dict()
         self.agent_manager = AgentManager(self.server_args.evict_pri_level, self.server_args.load_ahead_step)
         self.last_update_time = time.time()
-        self.last_batch_start_time = time.time()
-        self.last_batch_end_time = time.time()
-        self.last_batch_id = 0
+
         self.batch_per_timestep = 0
+        self.batch_prefill = 0
+        self.batch_decode = 0
+        self.last_batch_prefill = 0
+        self.last_batch_decode = 0
+        
+        self.last_prefill_token_count = 0
+        self.last_decode_token_count = 0
         self.prefill_token_count = 0
         self.decode_token_count = 0
+        
         self.activate_agent = set()
         self.prefetch_agent = set()
         self.prefetch_lora = set()
+
+        # Timers for breakdown
+        self.time_get_next_batch = 0
+        self.time_get_prefill_batch = 0
+        self.time_get_decode_batch = 0
+        self.time_process_result = 0
+        self.time_gpu = 0
+        self.time_gpu_prefill = 0
+        self.time_gpu_decode = 0
+        self.time_gpu_start = 0
+        self.time_gpu_end = 0
+        self.load_kv_timer = 0
+        self.load_lora_timer = 0
+        
+        self.last_time_get_next_batch = 0
+        self.last_time_get_prefill_batch = 0
+        self.last_time_get_decode_batch = 0
+        self.last_time_process_result = 0
+        self.last_time_gpu = 0
+        self.last_time_gpu_prefill = 0
+        self.last_time_gpu_decode = 0
+        self.last_time_gpu_start = 0
+        self.last_time_gpu_end = 0
+
 
         # Init inter-process communication
         context = zmq.Context(2)
@@ -859,16 +889,29 @@ class Scheduler(
     @DynamicGradMode()
     def event_loop_normal(self):
         """A normal scheduler loop."""
+        logger.critical("\033[91m   Using normal event loop\033[0m")
         while True:
             recv_reqs = self.recv_requests()
+
             self.process_input_requests(recv_reqs)
 
+            tic = time.perf_counter()
             batch = self.get_next_batch_to_run()
+            self.time_get_next_batch += time.perf_counter() - tic
             self.cur_batch = batch
 
             if batch:
+                tic = time.perf_counter()
                 result = self.run_batch(batch)
+                self.time_gpu += time.perf_counter() - tic
+                if batch.forward_mode == ForwardMode.EXTEND:
+                    self.time_gpu_prefill += time.perf_counter() - tic
+                elif batch.forward_mode == ForwardMode.DECODE:
+                    self.time_gpu_decode += time.perf_counter() - tic
+                tic = time.perf_counter()
                 self.process_batch_result(batch, result)
+                self.time_process_result = time.perf_counter() - tic
+                self.batch_per_timestep += 1
             else:
                 # When the server is idle, do self-check and re-init some states
                 self.self_check_during_idle()
@@ -884,7 +927,9 @@ class Scheduler(
             recv_reqs = self.recv_requests()
             self.process_input_requests(recv_reqs)
 
+            tic = time.perf_counter()
             batch = self.get_next_batch_to_run()
+            self.time_get_next_batch += time.perf_counter() - tic
             self.cur_batch = batch
 
             if batch:
@@ -905,6 +950,13 @@ class Scheduler(
             if self.last_batch:
                 # Process the results of the last batch
                 tmp_batch, tmp_result = self.result_queue.popleft()
+                self.time_gpu_end = time.perf_counter()
+                if self.time_gpu_start != 0:
+                    self.time_gpu += self.time_gpu_end - self.time_gpu_start
+                    if self.last_batch.forward_mode == ForwardMode.EXTEND:
+                        self.time_gpu_prefill += self.time_gpu_end - self.time_gpu_start
+                    elif self.last_batch.forward_mode == ForwardMode.DECODE:
+                        self.time_gpu_decode += self.time_gpu_end - self.time_gpu_start
                 tmp_batch.next_batch_sampling_info = (
                     self.tp_worker.cur_sampling_info if batch else None
                 )
@@ -914,6 +966,8 @@ class Scheduler(
                 )
                 self.batch_per_timestep += 1
             elif batch is None:
+                self.time_gpu_start = 0
+                self.time_gpu_end = 0
                 # When the server is idle, do self-check and re-init some states
                 self.self_check_during_idle()
 
@@ -922,6 +976,7 @@ class Scheduler(
     @DynamicGradMode()
     def event_loop_pp(self):
         """A non-overlap scheduler loop for pipeline parallelism."""
+        logger.critical("\033[91m   Using overlap event loop\033[0m")
         mbs = [None] * self.pp_size
         last_mbs = [None] * self.pp_size
         self.running_mbs = [
@@ -1614,6 +1669,7 @@ class Scheduler(
 
     def get_next_batch_to_run(self) -> Optional[ScheduleBatch]:
         # Merge the prefill batch into the running batch
+        tic = time.perf_counter()
         chunked_req_to_exclude = set()
         if self.chunked_req:
             # Move the chunked request out of the batch so that we can merge
@@ -1645,7 +1701,10 @@ class Scheduler(
                     # Merge running_batch with prefill batch
                     self.running_batch.merge_batch(self.last_batch)
 
+        self.time_get_decode_batch += time.perf_counter() - tic
+        tic = time.perf_counter()
         new_batch = self.get_new_batch_prefill()
+        prefill_timer = time.perf_counter() - tic
 
         need_dp_attn_preparation = require_mlp_sync(self.server_args)
 
@@ -1658,11 +1717,14 @@ class Scheduler(
         if new_batch is not None:
             # Run prefill first if possible
             ret = new_batch
+            self.time_get_prefill_batch += prefill_timer
         else:
             # Run decode
+            tic = time.perf_counter()
             if not self.running_batch.is_empty():
                 self.running_batch = self.update_running_batch(self.running_batch)
                 ret = self.running_batch if not self.running_batch.is_empty() else None
+                self.time_get_decode_batch += time.perf_counter() - tic
             else:
                 ret = None
 
@@ -2025,9 +2087,12 @@ class Scheduler(
         result: Union[GenerationBatchResult, EmbeddingBatchResult],
         launch_done: Optional[threading.Event] = None,
     ):
+        tic = time.perf_counter()
         if batch.forward_mode.is_decode():
+            self.batch_decode += 1
             self.process_batch_result_decode(batch, result, launch_done)
         elif batch.forward_mode.is_extend():
+            self.batch_prefill += 1
             self.process_batch_result_prefill(batch, result, launch_done)
         elif batch.forward_mode.is_idle():
             if self.enable_overlap:
@@ -2037,6 +2102,7 @@ class Scheduler(
             self.set_next_batch_sampling_info_done(batch)
 
         self.maybe_send_health_check_signal()
+        self.time_process_result += time.perf_counter() - tic
 
     def maybe_send_health_check_signal(self):
         if self.return_health_check_ct:
@@ -2779,16 +2845,32 @@ class Scheduler(
                 end_time = time.time()                
                 lasting_time = end_time - last_update_time
                 # self.lora_manager.memory_pool.print_buffer_status()
-                rate = self.decode_token_count / self.prefill_token_count if self.prefill_token_count > 0 else -1
-                logger.critical(f"\033[94m UPDATE \033[0m: Prefill Token: {self.prefill_token_count}, Decode Token: {self.decode_token_count}, rate = {rate}")
-                logger.critical(f"\033[94m UPDATE \033[0m:   [{lasting_time:.3f}s][{recv_req.timestep_cnt} ts][{self.batch_per_timestep} batch] Updated timestep data: {recv_req.timestep_data}, Updated agent data: {recv_req.agent_data} evict: {self.tree_cache.evictable_size()}")
+                rate = (self.decode_token_count - self.last_decode_token_count) / (self.prefill_token_count - self.last_prefill_token_count) if (self.prefill_token_count - self.last_prefill_token_count) > 0 else -1
+                rate_all = self.decode_token_count / self.prefill_token_count if self.prefill_token_count > 0 else -1
+                logger.critical(f"\033[94m UPDATE \033[0m:  Prefill Token: {self.prefill_token_count - self.last_prefill_token_count} / {self.prefill_token_count}, Decode Token: {self.decode_token_count - self.last_decode_token_count} / {self.decode_token_count}, rate = {rate} / {rate_all}")
+                logger.critical(f"\033[94m UPDATE \033[0m:  [PREPARE {self.time_get_next_batch - self.last_time_get_next_batch}](Prefill {self.time_get_prefill_batch - self.last_time_get_prefill_batch})(decode={self.time_get_decode_batch - self.last_time_get_decode_batch})\n"
+                                f"[GPU {self.time_gpu - self.last_time_gpu} / {self.time_gpu}](Prefill={self.time_gpu_prefill - self.last_time_gpu_prefill} / {self.time_gpu_prefill})(Decode={self.time_gpu_decode - self.last_time_gpu_decode} / {self.time_gpu_decode})\n"
+                                f"[PROCESS: {self.time_process_result - self.last_time_process_result}] ")
+                logger.critical(f"\033[94m UPDATE \033[0m:  [{self.batch_per_timestep} batch][{self.batch_prefill - self.last_batch_prefill} / {self.batch_prefill} prefill][{self.batch_decode - self.last_batch_decode} / {self.batch_decode} decode]")
+                logger.critical(f"\033[94m UPDATE \033[0m:  [{lasting_time:.3f}s][{recv_req.timestep_cnt} ts] Updated timestep data: {recv_req.timestep_data}, Updated agent data: {recv_req.agent_data} evict: {self.tree_cache.evictable_size()}")
                 logger.critical(f"Memory stats: {self.token_to_kv_pool_allocator.get_memory_stats()}, page size: {self.token_to_kv_pool_allocator.page_size}")
                 logger.critical("==="*10)
                 self.batch_per_timestep = 0
-                self.prefill_token_count = 0
-                self.decode_token_count = 0
                 self.activate_agent = set()
                 self.last_update_time = time.time()
+                self.last_time_get_next_batch = self.time_get_next_batch
+                self.last_time_get_prefill_batch = self.time_get_prefill_batch
+                self.last_time_get_decode_batch = self.time_get_decode_batch
+                self.last_time_process_result = self.time_process_result
+                self.last_time_gpu = self.time_gpu
+                self.last_time_gpu_prefill = self.time_gpu_prefill
+                self.last_time_gpu_decode = self.time_gpu_decode
+                self.last_time_gpu_start = self.time_gpu_start
+                self.last_time_gpu_end = self.time_gpu_end
+                self.last_prefill_token_count = self.prefill_token_count
+                self.last_decode_token_count = self.decode_token_count
+                self.last_batch_prefill = self.batch_prefill
+                self.last_batch_decode = self.batch_decode
             except Exception as e:
                 logger.error(f"Failed to update agent timesteps: {e}")
         else:

@@ -309,7 +309,7 @@ class HiRadixCache(RadixCache):
 
         if len(leaves) == 0:
             logger.warning("\033[33m [Evict][all] No more leaves to evict \033[0m")
-        logger.warning(f"\033[33m [Evict][all] evict len = {num_evicted} \033[0m")
+        logger.info(f"\033[33m [Evict][all] evict len = {num_evicted} \033[0m")
 
         if self.cache_controller.write_policy == "write_back":
             self.writing_check(write_back=True)
@@ -907,10 +907,10 @@ class HiRadixCache(RadixCache):
         n = req_last_node
         while n != self.root_node:
             if n.evicted:
-                logger.warning(f"[status]   evicted id: {n.id}")
+                logger.info(f"[status]   evicted id: {n.id}")
                 return self.REQ_IS_EVICTED
             if n.loading:
-                logger.warning(f"[status]   loading id: {n.id}")
+                logger.info(f"[status]   loading id: {n.id}")
                 return self.REQ_IS_LOADING
             n = n.parent
             logger.info(f"\033[91m [status] node id: {n.id}, evicted: {n.evicted}, loading: {n.loading}\033[0m")
