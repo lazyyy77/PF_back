@@ -782,15 +782,15 @@ class SchedulerOutputProcessorMixin:
                 
                 for agent_id in agent_ids:
                     to_break = False
-                    # if int(agent_id) >= 0:
-                    #     lora_name = f"lora{agent_id}"
-                    # else:
-                    #     lora_name = "None"
-                    # lora_name = "lora0"
-                    # to_break = not self.prefetch_lora_timesteps(lora_name, priority=step, step_lora_names=lora_names)
-                    # if not to_break:
-                    #     agent_prefetch_statistic[agent_id] = True
-                    #     self.prefetch_lora.add(lora_name)
+                    if int(agent_id) >= 0:
+                        lora_name = f"lora{agent_id}"
+                    else:
+                        lora_name = "None"
+                    lora_name = "lora0"
+                    to_break = not self.prefetch_lora_timesteps(lora_name, priority=step, step_lora_names=lora_names)
+                    if not to_break:
+                        agent_prefetch_statistic[agent_id] = True
+                        self.prefetch_lora.add(lora_name)
 
                     last_nodes = self.agent_manager.agent_to_last_nodes.get(agent_id, [])
                     # 确保 last_nodes 不为 None
