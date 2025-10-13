@@ -388,6 +388,8 @@ class ServerArgs:
     evict_pri_level: int = 4
     self_debug: bool = False
     disable_prefetch: bool = False
+    disable_lr_pf: bool = False
+    disable_kv_pf: bool = False
 
 
     def __post_init__(self):
@@ -2143,6 +2145,16 @@ class ServerArgs:
             "--disable-prefetch",
             action="store_true",
             help="Disable prefetching"
+        )
+        parser.add_argument(
+            "--disable-lr-pf",
+            action="store_true",
+            help="Disable prefetching lora",
+        )
+        parser.add_argument(
+            "--disable-kv-pf",
+            action="store_true",
+            help="Disable prefetching kv",
         )
 
 

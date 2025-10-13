@@ -204,7 +204,7 @@ class LoRAManager:
         """
         Validate if the LoRA IDs in the batch can be loaded into the current LoRA memory pool.
         """
-        if len(lora_ids) > self.max_loras_per_batch:
+        if len(lora_ids) > self.max_loras_per_batch - 1:
             return False
 
         # skip pinned LoRA check if no pinned LoRA adapters are loaded.
