@@ -65,6 +65,9 @@ class LoRAManager:
         self.device: torch.device = next(self.base_model.parameters()).device
         self.tp_size: int = tp_size
         self.tp_rank: int = tp_rank
+        
+        self.prepare_lora_time = 0
+        self.last_prepare_lora_time = 0
 
         # LoRA backend for running sgemm kernels
         logger.info(f"Using {lora_backend} as backend of LoRA kernels.")
@@ -236,7 +239,8 @@ class LoRAManager:
         Prefetch LoRA weights from CPU to GPU memory for the given LoRA name.
         """
         lora_name = self.memory_pool._lora_registry.get(lora_id, lora_id) if self.memory_pool._lora_registry else lora_id
-        logger.info(f"\033[94m [lora][Prefetch] \033[0m    Try to prefetch LoRA adapter weights: {lora_name} with priority {priority}, step_lora_ids: {step_lora_ids}")
+        logger.warning(f"\033[94m [lora][Prefetch] \033[0m    Try to prefetch LoRA adapter weights: {lora_name} with priority {priority}, step lora ids is in info level")
+        logger.info(f"\033[94m [lora][Prefetch] \033[0m    step_lora_ids: {step_lora_ids}")
         success = self.memory_pool.prefetch_lora_weights(
             lora_id=lora_id,
             priority=priority,
@@ -249,6 +253,7 @@ class LoRAManager:
         
     def prepare_lora_batch(self, forward_batch: ForwardBatch):
 
+        t0 = time.perf_counter()
         # Load active loras into lora memory pool
         cur_uids = set(forward_batch.lora_ids)
         cur_names = []
@@ -364,6 +369,8 @@ class LoRAManager:
                 scalings=scalings,
             )
         self.lora_backend.set_batch_info(batch_info)
+
+        self.prepare_lora_time += time.perf_counter() - t0
 
     def update_lora_info(self):
         """
@@ -536,3 +543,9 @@ class LoRAManager:
                 self.lora_modules[layer_id][module_name] = self.set_lora_module(
                     module_name, module
                 )
+
+    def get_and_update_lora_time(self):
+        delta_prepare = self.prepare_lora_time - self.last_prepare_lora_time
+        self.last_prepare_lora_time = self.prepare_lora_time
+        delta_load = self.memory_pool.get_and_update_pure_lora_load_time()
+        return delta_prepare, delta_load

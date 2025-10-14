@@ -294,6 +294,7 @@ class Scheduler(
         self.time_gpu_end = 0
         self.load_kv_timer = 0
         self.load_lora_timer = 0
+        self.prepare_lora_time = 0
         
         self.last_time_get_batch = 0
         self.last_time_get_prefill_batch = 0
@@ -304,6 +305,7 @@ class Scheduler(
         self.last_time_gpu_decode = 0
         self.last_time_gpu_start = 0
         self.last_time_gpu_end = 0
+        self.last_prepare_lora_time = 0
         
         self.time_start = -1
         self.idle_start_time = 0
@@ -911,6 +913,7 @@ class Scheduler(
                     self.is_idle = False
                     if self.new_timestep == True:
                         self.new_timestep = False
+                        logger.critical("\033[95m   [BD] New Timestep, Start to Count   \033[0m")
                     else:
                         self.time_get_other_batch += time.perf_counter() - self.idle_start_time
                 t1 = time.perf_counter()
@@ -2817,6 +2820,7 @@ class Scheduler(
         """Prefetch LoRA adapter weights for the next few time steps."""
         # remember to call update_lora_priority before this
         if not self.lora_registry or lora_name is None:
+            logger.error("LoRA registry is empty or lora_name is None, cannot prefetch LoRA weights.")
             return
         lora_id = self.lora_registry.get(lora_name, None)
         step_lora_ids = [self.lora_registry.get(name, None) for name in step_lora_names if name in self.lora_registry]
@@ -2864,16 +2868,20 @@ class Scheduler(
                 # self.lora_manager.memory_pool.print_buffer_status()
                 rate = (self.decode_token_count - self.last_decode_token_count) / (self.prefill_token_count - self.last_prefill_token_count) if (self.prefill_token_count - self.last_prefill_token_count) > 0 else -1
                 rate_all = self.decode_token_count / self.prefill_token_count if self.prefill_token_count > 0 else -1
-                logger.critical(f"\033[94m UPDATE \033[0m:  Prefill Token: this={self.prefill_token_count - self.last_prefill_token_count} / all={self.prefill_token_count}, Decode Token: this={self.decode_token_count - self.last_decode_token_count} / all={self.decode_token_count}, rate = this={rate:.4f} / all={rate_all:.4f}")
-                logger.critical(f"\033[94m UPDATE \033[0m:  [PREPARE {self.time_get_batch - self.last_time_get_batch:.4f}][Prefill {self.time_get_prefill_batch - self.last_time_get_prefill_batch:.4f}] [Other {self.time_get_other_batch - self.last_time_get_other_batch:.4f}] [PROCESS {self.time_process_result - self.last_time_process_result:.4f}] ")
-                logger.critical(f"\033[94m UPDATE \033[0m:  [GPU+Process {self.time_gpu - self.last_time_gpu:.4f} / {self.time_gpu:.4f}](Prefill={self.time_gpu_prefill - self.last_time_gpu_prefill:.4f} / {self.time_gpu_prefill:.4f})(Decode={self.time_gpu_decode - self.last_time_gpu_decode:.4f} / {self.time_gpu_decode:.4f})")
+                logger.critical(f"\033[94m TOKENN \033[0m:  Prefill Token: this={self.prefill_token_count - self.last_prefill_token_count} / all={self.prefill_token_count}, Decode Token: this={self.decode_token_count - self.last_decode_token_count} / all={self.decode_token_count}, rate = this={rate:.4f} / all={rate_all:.4f}")
+                if self.server_args.enable_hierarchical_cache:
+                    logger.critical(f"\033[94m BEFORE \033[0m:  [PREPARE {self.time_get_batch - self.last_time_get_batch:.4f}][Prefill {self.time_get_prefill_batch - self.last_time_get_prefill_batch:.4f}] [Other {self.time_get_other_batch - self.last_time_get_other_batch:.4f}] [PROCESS {self.time_process_result - self.last_time_process_result:.4f}] [KV {self.tree_cache.cache_controller.get_and_update_load_time():.6f}]")
+                else:
+                    logger.critical(f"\033[94m BEFORE \033[0m:  [PREPARE {self.time_get_batch - self.last_time_get_batch:.4f}][Prefill {self.time_get_prefill_batch - self.last_time_get_prefill_batch:.4f}] [Other {self.time_get_other_batch - self.last_time_get_other_batch:.4f}] [PROCESS {self.time_process_result - self.last_time_process_result:.4f}]")
+                logger.critical(f"\033[94m GPURUN \033[0m:  [LORA {self.lora_manager.get_and_update_lora_time()}] [GPU+Process {self.time_gpu - self.last_time_gpu:.4f} / {self.time_gpu:.4f}](Prefill={self.time_gpu_prefill - self.last_time_gpu_prefill:.4f} / {self.time_gpu_prefill:.4f})(Decode={self.time_gpu_decode - self.last_time_gpu_decode:.4f} / {self.time_gpu_decode:.4f})")
                 g0 = self.tp_worker.time_gpu
                 g1 = self.tp_worker.time_gpu_prefill
                 g2 = self.tp_worker.time_gpu_decode
-                logger.critical(f"\033[94m UPDATE \033[0m:  [TP GPU {g0:.4f}](Prefill {g1:.4f})(Decode={g2:.4f})")
+                logger.critical(f"\033[94m GPURUN \033[0m:  [TP GPU {g0:.4f}](Prefill {g1:.4f})(Decode={g2:.4f})")
                 self.tp_worker.time_gpu = 0.0
                 self.tp_worker.time_gpu_prefill = 0.0
                 self.tp_worker.time_gpu_decode = 0.0
+                
                 logger.critical(f"\033[94m UPDATE \033[0m:  [{self.batch_per_timestep} batch][{self.batch_prefill - self.last_batch_prefill} / {self.batch_prefill} prefill][{self.batch_decode - self.last_batch_decode} / {self.batch_decode} decode]")
                 logger.critical(f"\033[94m UPDATE \033[0m:  [{lasting_time:.4f}s][{recv_req.timestep_cnt} ts] Updated timestep data: {recv_req.timestep_data}, Updated agent data: {recv_req.agent_data} evict: {self.tree_cache.evictable_size()}")
                 logger.critical(f"Memory stats: {self.token_to_kv_pool_allocator.get_memory_stats()}, page size: {self.token_to_kv_pool_allocator.page_size}")
@@ -2895,6 +2903,7 @@ class Scheduler(
                 self.last_batch_prefill = self.batch_prefill
                 self.last_batch_decode = self.batch_decode
                 self.new_timestep = True
+                logger.critical("\033[95m   [BD] Timestep End, Stop to Count   \033[0m")
             except Exception as e:
                 logger.error(f"Failed to update agent timesteps: {e}")
         else:
