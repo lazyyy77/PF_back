@@ -777,7 +777,7 @@ class SchedulerOutputProcessorMixin:
                     continue
                 for agent_id in agent_ids:
                     lora_names.append(f"lora{agent_id}" if int(agent_id) > 0 else "lora0")
-                logger.warning(f"[Prefetch] step: {step}, agent_ids: {agent_ids}, lora_names: {lora_names}")
+                logger.warning(f"[pf = {step}] agent_ids: {agent_ids}, lora_names: {lora_names}")
                 agent_prefetch_statistic = {}
                 
                 for agent_id in agent_ids:
@@ -786,8 +786,8 @@ class SchedulerOutputProcessorMixin:
                         if int(agent_id) >= 0:
                             lora_name = f"lora{agent_id}"
                         else:
-                            lora_name = "None"
-                        lora_name = "lora0"
+                            # lora_name = "None"
+                            lora_name = "lora0"
                         to_break = not self.prefetch_lora_timesteps(lora_name, priority=step, step_lora_names=lora_names)
                         if not to_break:
                             agent_prefetch_statistic[agent_id] = True
@@ -847,7 +847,7 @@ class SchedulerOutputProcessorMixin:
 
                         self.tree_cache.load_cache_event.set()
 
-                    logger.warning(f"[pf = {step}], with each agent prefetch situation: {agent_prefetch_statistic}")
+                    # logger.warning(f"[pf = {step}], with each agent prefetch situation: {agent_prefetch_statistic}")
                 if to_break:
                     break
         except Exception as e:

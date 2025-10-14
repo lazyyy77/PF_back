@@ -251,6 +251,9 @@ class HiCacheController:
         self.page_size = page_size
         self.io_backend = io_backend
         self.enable_storage = False
+        
+        self.load_kv_time = 0
+        self.last_load_kv_time = 0
 
         if storage_backend is not None:
             self.storage_backend_type = storage_backend
@@ -611,6 +614,8 @@ class HiCacheController:
                     if operation is None or is_interrupt == True:
                         continue
                         
+                    t0 = time.perf_counter()
+                    
                     while self.load_queue.qsize() > 0:
                         op = self.load_queue.get(block=True)
                         if op.priority == operation.priority:
@@ -662,6 +667,9 @@ class HiCacheController:
                         if node_id != 0:
                             self.ack_load_queue.put(node_id)
 
+                    self.load_kv_time += time.perf_counter() - t0
+                    self.logger.warning(f"[CC]    Timestep load_kv_time: {self.load_kv_time - self.last_load_kv_time}")
+                    
                 except Exception as e:
                     logger.error(f"Error during load operation: {e}")
                     interrupted_operation = [operation]
@@ -1058,3 +1066,9 @@ class HiCacheController:
             self.load_queue.queue.extend(remaining_operations)
         if outdated_operations:
             self._handle_outdated_operations(outdated_operations)
+    
+    def get_and_update_load_time(self):
+        delta = self.load_kv_time - self.last_load_kv_time
+        self.last_load_kv_time = self.load_kv_time
+        return delta
+    

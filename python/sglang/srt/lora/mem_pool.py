@@ -124,6 +124,8 @@ class LoRAMemoryPool:
         self.load_lora_stream = torch.cuda.Stream()
         self.stop_lora_event = threading.Event()
         self.load_lora_queue = Queue()
+        self.pure_load_lora_time = 0
+        self.last_pure_load_lora_time = 0
         
         self._lora_registry = None
 
@@ -289,6 +291,7 @@ class LoRAMemoryPool:
                     return False
             else:
                 buffer_id = self.uid_to_buffer_id[lora_id]
+                logger.info(f"[lora][prefetch]  update priority: {self.buffer_id_to_uid[buffer_id].priority} -> {priority}")
                 self.buffer_id_to_uid[buffer_id].priority = priority
         
             return True
@@ -395,6 +398,7 @@ class LoRAMemoryPool:
                 ), f"LoRA buffer shape {buffer_view.shape} does not match weight shape {weight.shape}."
                 buffer_view.copy_(weight)
 
+        t0 = time.perf_counter()
         if uid is None:
             for i in range(self.num_layer):
                 for k in self.A_buffer.keys():
@@ -447,6 +451,8 @@ class LoRAMemoryPool:
                 buffer_view = target_buffer[buffer_id, :, :lora_rank]
                 load_lora_weight_tensor(buffer_view, weights)
 
+        self.pure_load_lora_time += time.perf_counter() - t0
+
     def get_tensor(
         self, target_module: str, layer_id: int, lora_type: LoRAType
     ) -> torch.Tensor:
@@ -497,3 +503,8 @@ class LoRAMemoryPool:
             slot = self.buffer_id_to_uid[i]
             buffer.append(f"{i}:{self._lora_registry[slot.uid]}, p={slot.priority}, s={slot.status}, pin={slot.pinned}")
         logger.critical(f"[lora][status]  LoRA buffer status: {buffer}")
+
+    def get_and_update_pure_lora_load_time(self):
+        delta = self.pure_load_lora_time - self.last_pure_load_lora_time
+        self.last_pure_load_lora_time = self.pure_load_lora_time
+        return delta
