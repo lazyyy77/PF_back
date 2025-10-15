@@ -940,6 +940,8 @@ class Scheduler(
     def event_loop_overlap(self):
         """A scheduler loop that overlaps the CPU processing and GPU computation."""
         self.result_queue = deque()
+        time_gpu_start = 0
+        last_time_gpu_start = 0
 
         while True:
             recv_reqs = self.recv_requests()
@@ -947,12 +949,23 @@ class Scheduler(
 
             tic = time.perf_counter()
             batch = self.get_next_batch_to_run()
-            self.time_get_next_batch += time.perf_counter() - tic
-                
+            if self.new_timestep == False:
+                self.time_get_batch += time.perf_counter() - tic
+
             self.cur_batch = batch
 
             if batch:
+                if self.is_idle == True:
+                    self.is_idle = False
+                    if self.new_timestep == True:
+                        self.new_timestep = False
+                        logger.critical("\033[95m   [BD] New Timestep, Start to Count   \033[0m")
+                    else:
+                        self.time_get_other_batch += time.perf_counter() - self.idle_start_time
                 batch.launch_done = threading.Event()
+
+                last_time_gpu_start = time_gpu_start
+                time_gpu_start = time.perf_counter()
                 result = self.run_batch(batch)
                 self.result_queue.append((batch.copy(), result))
 
@@ -965,17 +978,19 @@ class Scheduler(
                         next_batch_sampling_info=self.tp_worker.cur_sampling_info,
                     )
                     self.process_batch_result(tmp_batch, None, batch.launch_done)
+                    self.time_gpu += time.perf_counter() - time_gpu_start
+                    
 
             if self.last_batch:
                 # Process the results of the last batch
                 tmp_batch, tmp_result = self.result_queue.popleft()
-                self.time_gpu_end = time.perf_counter()
+                time_gpu_end = time.perf_counter()
                 if self.time_gpu_start != 0:
-                    self.time_gpu += self.time_gpu_end - self.time_gpu_start
+                    self.time_gpu += time_gpu_end - last_time_gpu_start
                     if self.last_batch.forward_mode == ForwardMode.EXTEND:
-                        self.time_gpu_prefill += self.time_gpu_end - self.time_gpu_start
+                        self.time_gpu_prefill += time_gpu_end - last_time_gpu_start
                     elif self.last_batch.forward_mode == ForwardMode.DECODE:
-                        self.time_gpu_decode += self.time_gpu_end - self.time_gpu_start
+                        self.time_gpu_decode += time_gpu_end - last_time_gpu_start
                 tmp_batch.next_batch_sampling_info = (
                     self.tp_worker.cur_sampling_info if batch else None
                 )
@@ -987,6 +1002,9 @@ class Scheduler(
             elif batch is None:
                 self.time_gpu_start = 0
                 self.time_gpu_end = 0
+                if self.is_idle == False:
+                    self.is_idle = True
+                    self.idle_start_time = time.perf_counter()
                 # When the server is idle, do self-check and re-init some states
                 self.self_check_during_idle()
 
@@ -2874,14 +2892,9 @@ class Scheduler(
                 else:
                     logger.critical(f"\033[94m BEFORE \033[0m:  [PREPARE {self.time_get_batch - self.last_time_get_batch:.4f}][Prefill {self.time_get_prefill_batch - self.last_time_get_prefill_batch:.4f}] [Other {self.time_get_other_batch - self.last_time_get_other_batch:.4f}] [PROCESS {self.time_process_result - self.last_time_process_result:.4f}]")
                 logger.critical(f"\033[94m GPURUN \033[0m:  [LORA {self.lora_manager.get_and_update_lora_time()}] [GPU+Process {self.time_gpu - self.last_time_gpu:.4f} / {self.time_gpu:.4f}](Prefill={self.time_gpu_prefill - self.last_time_gpu_prefill:.4f} / {self.time_gpu_prefill:.4f})(Decode={self.time_gpu_decode - self.last_time_gpu_decode:.4f} / {self.time_gpu_decode:.4f})")
-                g0 = self.tp_worker.time_gpu
-                g1 = self.tp_worker.time_gpu_prefill
-                g2 = self.tp_worker.time_gpu_decode
+                g0, g1, g2 = self.tp_worker.get_gpu_time()
                 logger.critical(f"\033[94m GPURUN \033[0m:  [TP GPU {g0:.4f}](Prefill {g1:.4f})(Decode={g2:.4f})")
-                self.tp_worker.time_gpu = 0.0
-                self.tp_worker.time_gpu_prefill = 0.0
-                self.tp_worker.time_gpu_decode = 0.0
-                
+                self.tp_worker.reset_gpu_time()
                 logger.critical(f"\033[94m UPDATE \033[0m:  [{self.batch_per_timestep} batch][{self.batch_prefill - self.last_batch_prefill} / {self.batch_prefill} prefill][{self.batch_decode - self.last_batch_decode} / {self.batch_decode} decode]")
                 logger.critical(f"\033[94m UPDATE \033[0m:  [{lasting_time:.4f}s][{recv_req.timestep_cnt} ts] Updated timestep data: {recv_req.timestep_data}, Updated agent data: {recv_req.agent_data} evict: {self.tree_cache.evictable_size()}")
                 logger.critical(f"Memory stats: {self.token_to_kv_pool_allocator.get_memory_stats()}, page size: {self.token_to_kv_pool_allocator.page_size}")
@@ -3043,3 +3056,6 @@ def run_scheduler_process(
         traceback = get_exception_traceback()
         logger.error(f"Scheduler hit an exception: {traceback}")
         parent_process.send_signal(signal.SIGQUIT)
+
+
+### python -m sglang.launch_server --model-path Qwen/Qwen2.5-7B-Instruct --port 8001 --enable-lora --max-loras-per-batch 20 --lora-paths lora0=qingpingwan/Qwen2.5-7B-Lora-Law lora1=qingpingwan/Qwen2.5-7B-Lora-Law lora2=qingpingwan/Qwen2.5-7B-Lora-Law lora3=qingpingwan/Qwen2.5-7B-Lora-Law lora4=qingpingwan/Qwen2.5-7B-Lora-Law lora5=qingpingwan/Qwen2.5-7B-Lora-Law lora6=qingpingwan/Qwen2.5-7B-Lora-Law lora7=qingpingwan/Qwen2.5-7B-Lora-Law lora8=qingpingwan/Qwen2.5-7B-Lora-Law lora9=qingpingwan/Qwen2.5-7B-Lora-Law lora10=qingpingwan/Qwen2.5-7B-Lora-Law lora11=qingpingwan/Qwen2.5-7B-Lora-Law lora12=qingpingwan/Qwen2.5-7B-Lora-Law lora13=qingpingwan/Qwen2.5-7B-Lora-Law lora14=qingpingwan/Qwen2.5-7B-Lora-Law lora15=qingpingwan/Qwen2.5-7B-Lora-Law lora16=qingpingwan/Qwen2.5-7B-Lora-Law lora17=qingpingwan/Qwen2.5-7B-Lora-Law lora18=qingpingwan/Qwen2.5-7B-Lora-Law lora19=qingpingwan/Qwen2.5-7B-Lora-Law  lora20=qingpingwan/Qwen2.5-7B-Lora-Law lora21=qingpingwan/Qwen2.5-7B-Lora-Law lora22=qingpingwan/Qwen2.5-7B-Lora-Law lora23=qingpingwan/Qwen2.5-7B-Lora-Law lora24=qingpingwan/Qwen2.5-7B-Lora-Law lora25=qingpingwan/Qwen2.5-7B-Lora-Law  --lora-backend triton --max-total-tokens 50000 --enable-hierarchical-cache --hicache-size 10 --log-level warning --disable-kv-pf

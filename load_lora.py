@@ -3,7 +3,7 @@ import requests
 
 url = "http://127.0.0.1:8001"
 lora_path = "qingpingwan/Qwen2.5-7B-Lora-Law"
-agent_num = 10
+agent_num = 50
 
 for i in range(agent_num + 1):
     lora_name = f"lora{i}"
