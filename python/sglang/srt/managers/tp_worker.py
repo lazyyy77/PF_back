@@ -344,3 +344,11 @@ class TpModelWorker:
                     self.time_gpu_decode += elapsed_time
             except queue.Empty:
                 continue
+
+    def get_gpu_time(self):
+        return self.time_gpu, self.time_gpu_prefill, self.time_gpu_decode
+
+    def reset_gpu_time(self):
+        self.time_gpu = 0
+        self.time_gpu_prefill = 0
+        self.time_gpu_decode = 0
