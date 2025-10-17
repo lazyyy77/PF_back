@@ -496,9 +496,9 @@ class HiCacheController:
         op = CacheOperation(host_indices, device_indices, node_id, priority)
         duplicated = self._check_load_queue(op)
         self.load_queue.put(op)
-        if priority <= 1:
-            logger.info(f"\033[91m[Ctrl]    Load operation {op.id} for node {node_id}, priority: {priority}\033[0m")
-            self.interrupt_queue.put({"type": "interrupt", "priority": priority})
+        # if priority <= 1:
+        #     logger.info(f"\033[91m[Ctrl]    Load operation {op.id} for node {node_id}, priority: {priority}\033[0m")
+        #     self.interrupt_queue.put({"type": "interrupt", "priority": priority})
         return device_indices
 
     def move_indices(self, host_indices, device_indices):
@@ -668,7 +668,7 @@ class HiCacheController:
                             self.ack_load_queue.put(node_id)
 
                     self.load_kv_time += time.perf_counter() - t0
-                    self.logger.warning(f"[CC]    Timestep load_kv_time: {self.load_kv_time - self.last_load_kv_time}")
+                    logger.warning(f"[CC]    Timestep load_kv_time: {self.load_kv_time - self.last_load_kv_time}")
                     
                 except Exception as e:
                     logger.error(f"Error during load operation: {e}")
