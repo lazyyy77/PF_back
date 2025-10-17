@@ -310,7 +310,7 @@ class LoRAMemoryPool:
             for buffer_id in range(self.max_loras_per_batch):
                 if self.buffer_id_to_uid[buffer_id].uid == EMPTY_SLOT:
                     return buffer_id
-            logger.critical("[lora][prepare]  no enough slot for lora, need to evict")
+            logger.info("[lora][prepare]  no enough slot for lora, need to evict")
             target_priority, target_buffer_id, target_slot_id = -1, -1, -1
             try:
                 for buffer_id in range(0, self.max_loras_per_batch):
