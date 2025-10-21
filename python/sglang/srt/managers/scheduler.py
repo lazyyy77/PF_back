@@ -1835,35 +1835,35 @@ class Scheduler(
         prefix_computed = False
         if self.time_start == -1:
             self.time_start = time.perf_counter()
-        if self.enable_hierarchical_cache:
-            for req in self.waiting_queue:
-                if not req.is_fetched:
-                    if isinstance(self.tree_cache, LoRAHiRadixCache):
-                        # LoRA-aware prefix matching
-                        (
-                            req.prefix_indices,
-                            req.last_node,
-                            req.last_host_node,
-                            req.host_hit_length,
-                        ) = self.tree_cache.match_prefix_with_lora_id(
-                            key=LoRAKey(
-                                lora_id=req.lora_id, token_ids=req.adjust_max_prefix_ids()
-                            )
-                        )
-                    else:
-                        (
-                            req.prefix_indices,
-                            req.last_node,
-                            req.last_host_node,
-                            req.host_hit_length,
-                        ) = self.tree_cache.match_prefix(
-                            key=req.adjust_max_prefix_ids()
-                        )
-                    self.tree_cache._update_agent_to_last_nodes(req, req.last_host_node)
-                    req.is_fetched = True
-            prefix_computed = True
+        # if self.enable_hierarchical_cache:
+        #     for req in self.waiting_queue:
+        #         if not req.is_fetched:
+        #             if isinstance(self.tree_cache, LoRAHiRadixCache):
+        #                 # LoRA-aware prefix matching
+        #                 (
+        #                     req.prefix_indices,
+        #                     req.last_node,
+        #                     req.last_host_node,
+        #                     req.host_hit_length,
+        #                 ) = self.tree_cache.match_prefix_with_lora_id(
+        #                     key=LoRAKey(
+        #                         lora_id=req.lora_id, token_ids=req.adjust_max_prefix_ids()
+        #                     )
+        #                 )
+        #             else:
+        #                 (
+        #                     req.prefix_indices,
+        #                     req.last_node,
+        #                     req.last_host_node,
+        #                     req.host_hit_length,
+        #                 ) = self.tree_cache.match_prefix(
+        #                     key=req.adjust_max_prefix_ids()
+        #                 )
+        #             self.tree_cache._update_agent_to_last_nodes(req, req.last_host_node)
+        #             req.is_fetched = True
+        #     prefix_computed = True
 
-        # Get requests from the waiting queue to a new prefill batch
+        # # Get requests from the waiting queue to a new prefill batch
         for req in self.waiting_queue:
             
             if self.enable_lora and not self.tp_worker.can_run_lora_batch(
@@ -1897,15 +1897,15 @@ class Scheduler(
             )   # TODO: Check if this is needed
             # req.init_next_round_input(self.tree_cache)
             
-            if self.tree_cache is not None and self.enable_hierarchical_cache:
-                self.tree_cache.ready_to_load_host_cache() # TODO whether or not to do this? -> MUST DO IT!  enable layer?
-                loading_status = self.tree_cache.get_node_chain_status(req.last_host_node)
-                logger.warning(f"Request {req.rid} Node {req.last_host_node.id} evicted {req.last_host_node.evicted} loading {req.last_host_node.loading} loading status: {loading_status}")
-                if loading_status == self.tree_cache.REQ_IS_EVICTED:
-                    self.tree_cache.load_back(req.last_host_node, priority=0, check_reserve=True)
-                    continue
-                elif loading_status == self.tree_cache.REQ_IS_LOADING:
-                    continue
+            # if self.tree_cache is not None and self.enable_hierarchical_cache:
+            #     self.tree_cache.ready_to_load_host_cache() # TODO whether or not to do this? -> MUST DO IT!  enable layer?
+            #     loading_status = self.tree_cache.get_node_chain_status(req.last_host_node)
+            #     logger.warning(f"Request {req.rid} Node {req.last_host_node.id} evicted {req.last_host_node.evicted} loading {req.last_host_node.loading} loading status: {loading_status}")
+            #     if loading_status == self.tree_cache.REQ_IS_EVICTED:
+            #         self.tree_cache.load_back(req.last_host_node, priority=0, check_reserve=True)
+            #         continue
+            #     elif loading_status == self.tree_cache.REQ_IS_LOADING:
+            #         continue
 
             res = adder.add_one_req(req, has_chunked_req=(self.chunked_req is not None))
 

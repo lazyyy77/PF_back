@@ -460,7 +460,7 @@ class HiRadixCache(RadixCache):
     ):
         _ = host_hit_length  # unused, but kept for compatibility
         if last_node.evicted:
-            logger.critical(f"\033[94m Init Load back node {last_node.id} \033[0m")
+            logger.info(f"\033[94m Init Load back node {last_node.id} \033[0m")
             loading_values = self.load_back(last_node, mem_quota, priority)
             if loading_values is not None:
                 logger.debug(
