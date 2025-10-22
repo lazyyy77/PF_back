@@ -200,7 +200,6 @@ class LoRAMemoryPool:
             raise ValueError(
                 "No available buffer slots found. Please ensure the number of active loras is less than max_loras_per_batch."
             )
-
         for uid in cur_uids:
             if uid not in self.uid_to_buffer_id:
                 buffer_id = get_available_buffer_slot()

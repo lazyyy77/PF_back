@@ -7,6 +7,7 @@ from typing import List, Optional
 
 import torch
 
+from sglang.srt.managers.agent_manager import AgentManager
 from sglang.srt.managers.cache_controller import HiCacheController, PrefetchOperation
 from sglang.srt.mem_cache.allocator import BaseTokenToKVPoolAllocator
 from sglang.srt.mem_cache.base_prefix_cache import MatchResult
@@ -41,6 +42,7 @@ class HiRadixCache(RadixCache):
         hicache_storage_prefetch_policy: Optional[str] = "best_effort",
         model_name: Optional[str] = None,
         storage_backend_extra_config: Optional[str] = None,
+        agent_manager: Optional[AgentManager] = None,
     ):
 
         if hicache_io_backend == "direct":
@@ -77,6 +79,8 @@ class HiRadixCache(RadixCache):
         self.prefetch_threshold = 256
         self.prefetch_timeout = 3  # seconds
         self.prefetch_stop_policy = hicache_storage_prefetch_policy
+        # For PFEngine
+        self.agent_manager = agent_manager
 
         self.load_cache_event = threading.Event()
         self.cache_controller = HiCacheController(
@@ -108,6 +112,9 @@ class HiRadixCache(RadixCache):
         super().__init__(
             req_to_token_pool, token_to_kv_pool_allocator, page_size, disable=False
         )
+
+        logger.info(f"HiRadixCache initialized with write_policy = {hicache_write_policy}, write_through_threshold = {self.write_through_threshold}, "
+                    f"io_backend = {hicache_io_backend}, storage_backend = {hicache_storage_backend}, layout = {hicache_mem_layout}")
 
     def reset(self):
         TreeNode.counter = 0
