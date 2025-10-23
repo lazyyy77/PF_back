@@ -281,6 +281,9 @@ class Scheduler(
         self.activate_agent = set()
         self.prefetch_agent = set()
         self.prefetch_lora = set()
+        self.req_init_ttft = set()
+        self.req_queue_ttft = set()
+        self.req_prefill_ttft = set()
 
         # Timers for breakdown
         self.time_get_batch = 0
@@ -1526,6 +1529,9 @@ class Scheduler(
             self.disagg_decode_prealloc_queue.extend(reqs, is_retracted)
         else:
             self.waiting_queue.extend(reqs)
+            t0 = time.perf_counter()
+            for r in reqs:
+                r.waiting_queue_time = t0
 
     def handle_embedding_request(
         self,
@@ -2038,6 +2044,9 @@ class Scheduler(
         """Run a batch."""
         self.forward_ct += 1
 
+        for r in batch.reqs:
+            r.start_prefill_time = time.perf_counter()
+        
         # Whether to run the profiler
         self._profile_batch_predicate(batch)
         if self.forward_sleep_time is not None:
@@ -2895,6 +2904,10 @@ class Scheduler(
                 g0, g1, g2 = self.tp_worker.get_gpu_time()
                 logger.critical(f"\033[94m GPURUN \033[0m:  [TP GPU {g0:.4f}](Prefill {g1:.4f})(Decode={g2:.4f})")
                 self.tp_worker.reset_gpu_time()
+                init_ttft = sum(self.req_init_ttft) / len(self.req_init_ttft) if len(self.req_init_ttft) > 0 else 0
+                queue_ttft = sum(self.req_queue_ttft) / len(self.req_queue_ttft) if len(self.req_queue_ttft) > 0 else 0
+                prefill_ttft = sum(self.req_prefill_ttft) / len(self.req_prefill_ttft) if len(self.req_prefill_ttft) > 0 else 0
+                logger.critical(f"\033[94m TTFT \033[0m:  [Init {init_ttft:.4f}][Queue {queue_ttft:.4f}][Prefill {prefill_ttft:.4f}] {self.req_init_ttft} ||| {self.req_queue_ttft} ||| {self.req_prefill_ttft}")
                 logger.critical(f"\033[94m UPDATE \033[0m:  [{self.batch_per_timestep} batch][{self.batch_prefill - self.last_batch_prefill} / {self.batch_prefill} prefill][{self.batch_decode - self.last_batch_decode} / {self.batch_decode} decode]")
                 logger.critical(f"\033[94m UPDATE \033[0m:  [{lasting_time:.4f}s][{recv_req.timestep_cnt} ts] Updated timestep data: {recv_req.timestep_data}, Updated agent data: {recv_req.agent_data} evict: {self.tree_cache.evictable_size()}")
                 logger.critical(f"Memory stats: {self.token_to_kv_pool_allocator.get_memory_stats()}, page size: {self.token_to_kv_pool_allocator.page_size}")
@@ -2915,6 +2928,9 @@ class Scheduler(
                 self.last_decode_token_count = self.decode_token_count
                 self.last_batch_prefill = self.batch_prefill
                 self.last_batch_decode = self.batch_decode
+                self.req_init_ttft.clear()
+                self.req_queue_ttft.clear()
+                self.req_prefill_ttft.clear()
                 self.new_timestep = True
                 logger.critical("\033[95m   [BD] Timestep End, Stop to Count   \033[0m")
             except Exception as e:

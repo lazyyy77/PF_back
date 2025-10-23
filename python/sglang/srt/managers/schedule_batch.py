@@ -39,7 +39,7 @@ from enum import Enum, auto
 from http import HTTPStatus
 from itertools import chain
 from typing import TYPE_CHECKING, Any, List, Optional, Set, Tuple, Union
-
+import time
 import numpy as np
 import torch
 import triton
@@ -620,8 +620,11 @@ class Req:
         # For PFEnging
         self.agent_id = agent_id
         self.is_fetched = False
-        
-        
+        self.init_time = time.perf_counter()
+        self.waiting_queue_time = None
+        self.start_prefill_time = None
+        self.ttft_calculated = False
+
     @property
     def seqlen(self):
         return len(self.origin_input_ids) + len(self.output_ids)

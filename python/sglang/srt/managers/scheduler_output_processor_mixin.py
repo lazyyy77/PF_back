@@ -214,6 +214,15 @@ class SchedulerOutputProcessorMixin:
         result: GenerationBatchResult,
         launch_done: Optional[threading.Event] = None,
     ):
+        t0 = time.perf_counter()
+        for r in batch.reqs:
+            if r.ttft_calculated is False:
+                r.ttft_calculated = True
+                if r.init_time is not None and r.start_prefill_time is not None: # and r.waiting_queue_time is not None
+                    self.req_init_ttft.add(t0 - r.init_time)
+                    # self.req_queue_ttft.add(t0 - r.waiting_queue_time)
+                    self.req_prefill_ttft.add(t0 - r.start_prefill_time)
+
         logits_output, next_token_ids, can_run_cuda_graph = (
             result.logits_output,
             result.next_token_ids,
