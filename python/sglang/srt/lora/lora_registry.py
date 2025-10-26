@@ -201,7 +201,7 @@ class LoRARegistry:
         self._counters[lora_ref.lora_id] = ConcurrentCounter()
         
         update_registry_dict, update_counter_dict = self._get_update_dict()
-        print(f"[lora][registry][TokenManager] Updated LoRA registry: {update_registry_dict}")
+        print(f"[lora][registry][TokenManager] Updated LoRA registry")
         self.update_callback(update_registry_dict)
         
         return lora_ref

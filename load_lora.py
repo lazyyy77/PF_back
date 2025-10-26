@@ -3,7 +3,8 @@ import requests
 
 url = "http://127.0.0.1:8001"
 lora_path = "qingpingwan/Qwen2.5-7B-Lora-Law"
-agent_num = 50
+# lora_path = "yis77/lora32b"
+agent_num = 400
 
 for i in range(agent_num + 1):
     lora_name = f"lora{i}"
@@ -15,6 +16,6 @@ for i in range(agent_num + 1):
         },
     )
     if response.status_code == 200:
-        print(f"LoRA adapter {lora_name} loaded successfully.", response.json())
+        print(f"LoRA adapter {lora_name} loaded successfully.")
     else:
         print(f"Failed to load LoRA adapter {lora_name}.", response.json())
