@@ -314,6 +314,7 @@ class Scheduler(
         self.idle_start_time = 0
         self.is_idle = False
         self.new_timestep = True
+        self.req_nums = 0
 
         # Init inter-process communication
         context = zmq.Context(2)
@@ -1844,6 +1845,7 @@ class Scheduler(
         if self.enable_hierarchical_cache:
             for req in self.waiting_queue:
                 if not req.is_fetched:
+                    self.req_nums += 1
                     if isinstance(self.tree_cache, LoRAHiRadixCache):
                         # LoRA-aware prefix matching
                         (
@@ -2887,6 +2889,7 @@ class Scheduler(
                 # else:
                 #     self.tree_cache.pretty_print()
                 logger.critical(f"\033[94m UPDATE \033[0m: Activate Agent: {self.activate_agent}, Prefetch Agent: {self.prefetch_agent}, Prefetch LoRA: {self.prefetch_lora}")
+                kv_before = self.tree_cache.cache_controller.get_and_update_load_time()
                 if not self.server_args.disable_prefetch:
                     self.prefetch_agent_timestep(prefetch_step=self.server_args.load_ahead_step)
                 last_update_time = self.last_update_time
@@ -2897,7 +2900,7 @@ class Scheduler(
                 rate_all = self.decode_token_count / self.prefill_token_count if self.prefill_token_count > 0 else -1
                 logger.critical(f"\033[94m TOKENN \033[0m:  Prefill Token: this={self.prefill_token_count - self.last_prefill_token_count} / all={self.prefill_token_count}, Decode Token: this={self.decode_token_count - self.last_decode_token_count} / all={self.decode_token_count}, rate = this={rate:.4f} / all={rate_all:.4f}")
                 if self.server_args.enable_hierarchical_cache:
-                    logger.critical(f"\033[94m BEFORE \033[0m:  [PREPARE {self.time_get_batch - self.last_time_get_batch:.4f}][Prefill {self.time_get_prefill_batch - self.last_time_get_prefill_batch:.4f}] [Other {self.time_get_other_batch - self.last_time_get_other_batch:.4f}] [PROCESS {self.time_process_result - self.last_time_process_result:.4f}] [KV {self.tree_cache.cache_controller.get_and_update_load_time():.6f}]")
+                    logger.critical(f"\033[94m BEFORE \033[0m:  [PREPARE {self.time_get_batch - self.last_time_get_batch:.4f}][Prefill {self.time_get_prefill_batch - self.last_time_get_prefill_batch:.4f}] [Other {self.time_get_other_batch - self.last_time_get_other_batch:.4f}] [PROCESS {self.time_process_result - self.last_time_process_result:.4f}] [KV {kv_before} / {self.tree_cache.cache_controller.get_and_update_load_time():.6f}]")
                 else:
                     logger.critical(f"\033[94m BEFORE \033[0m:  [PREPARE {self.time_get_batch - self.last_time_get_batch:.4f}][Prefill {self.time_get_prefill_batch - self.last_time_get_prefill_batch:.4f}] [Other {self.time_get_other_batch - self.last_time_get_other_batch:.4f}] [PROCESS {self.time_process_result - self.last_time_process_result:.4f}]")
                 logger.critical(f"\033[94m GPURUN \033[0m:  [LORA {self.lora_manager.get_and_update_lora_time()}] [GPU+Process {self.time_gpu - self.last_time_gpu:.4f} / {self.time_gpu:.4f}](Prefill={self.time_gpu_prefill - self.last_time_gpu_prefill:.4f} / {self.time_gpu_prefill:.4f})(Decode={self.time_gpu_decode - self.last_time_gpu_decode:.4f} / {self.time_gpu_decode:.4f})")
@@ -2907,7 +2910,7 @@ class Scheduler(
                 init_ttft = sum(self.req_init_ttft) / len(self.req_init_ttft) if len(self.req_init_ttft) > 0 else 0
                 queue_ttft = sum(self.req_queue_ttft) / len(self.req_queue_ttft) if len(self.req_queue_ttft) > 0 else 0
                 prefill_ttft = sum(self.req_prefill_ttft) / len(self.req_prefill_ttft) if len(self.req_prefill_ttft) > 0 else 0
-                logger.critical(f"\033[94m TTFT \033[0m:  [Init {init_ttft:.4f}][Queue {queue_ttft:.4f}][Prefill {prefill_ttft:.4f}] {self.req_init_ttft} ||| {self.req_queue_ttft} ||| {self.req_prefill_ttft}")
+                logger.critical(f"\033[94m TTFT \033[0m:  [Init {init_ttft:.4f}][Queue {queue_ttft:.4f}][Prefill {prefill_ttft:.4f}][Reqs {self.req_nums}]{self.req_init_ttft} ||| {self.req_queue_ttft} ||| {self.req_prefill_ttft}")
                 logger.critical(f"\033[94m UPDATE \033[0m:  [{self.batch_per_timestep} batch][{self.batch_prefill - self.last_batch_prefill} / {self.batch_prefill} prefill][{self.batch_decode - self.last_batch_decode} / {self.batch_decode} decode]")
                 logger.critical(f"\033[94m UPDATE \033[0m:  [{lasting_time:.4f}s][{recv_req.timestep_cnt} ts] Updated timestep data: {recv_req.timestep_data}, Updated agent data: {recv_req.agent_data} evict: {self.tree_cache.evictable_size()}")
                 logger.critical(f"Memory stats: {self.token_to_kv_pool_allocator.get_memory_stats()}, page size: {self.token_to_kv_pool_allocator.page_size}")
@@ -2932,6 +2935,7 @@ class Scheduler(
                 self.req_queue_ttft.clear()
                 self.req_prefill_ttft.clear()
                 self.new_timestep = True
+                self.req_nums = 0
                 logger.critical("\033[95m   [BD] Timestep End, Stop to Count   \033[0m")
             except Exception as e:
                 logger.error(f"Failed to update agent timesteps: {e}")

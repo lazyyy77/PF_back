@@ -38,28 +38,42 @@ def parse_args():
     p.add_argument('--lora', action='store_true', help='使用 LORA 的统计')
     p.add_argument('--prepare', action='store_true', help='使用 PREPARE 的统计')
     p.add_argument('--token', action='store_true', help='使用 Token 模式统计 Prefill Token: this=... 的 this 值')
+    p.add_argument('--kvn', action='store_true', help='使用 KV 带斜杠的统计，例如 [KV 0.219 / 0.194]，分别统计斜杠前后两个值')
+    p.add_argument('--kvo', action='store_true', help='使用 KV 单值统计，例如 [KV 0.445417]，统计该 kv 值')
     p.add_argument('--min', type=int, default=None, help='非交互式: 最小组编号（包含），回车或不提供表示不限制')
     p.add_argument('--max', type=int, default=None, help='非交互式: 最大组编号（包含），回车或不提供表示不限制')
     return p.parse_args()
 
 
-PATTERN_TTFT = re.compile(r"\[Init\s+([0-9]*\.?[0-9]+)\]\[Queue\s+[0-9]*\.?[0-9]+\]\[Prefill\s+([0-9]*\.?[0-9]+)\]")
+PATTERN_TTFT = re.compile(r"\[Init\s+([0-9]*\.?[0-9]+)\]\[Queue\s+[0-9]*\.?[0-9]+\]\[Prefill\s+([0-9]*\.?[0-9]+)\](?:\[Reqs\s+([0-9]+)\])?")
 PATTERN_GPU = re.compile(r"\[TP GPU\s+([0-9]*\.?[0-9]+)\]\(Prefill\s+([0-9]*\.?[0-9]+)\)\(Decode=([0-9]*\.?[0-9]+)\)")
 PATTERN_LORA = re.compile(r"\[LORA\s*\(\s*([0-9]*\.?[0-9]+)\s*,\s*([0-9]*\.?[0-9]+)\s*\)\]")
-PATTERN_PREPARE = re.compile(r"\[PREPARE\s+([0-9]*\.?[0-9]+)\]\[Prefill\s+([0-9]*\.?[0-9]+)\]\s*\[Other\s+([0-9]*\.?[0-9]+)\]\s*\[PROCESS\s+([0-9]*\.?[0-9]+)\]\s*\[KV\s+([0-9]*\.?[0-9]+)\]")
-PATTERN_TOKEN = re.compile(r"Prefill Token:\s*this=([0-9]*\.?[0-9]+)")
+PATTERN_PREPARE = re.compile(r"\[PREPARE\s+([0-9]*\.?[0-9]+)\]\[Prefill\s+([0-9]*\.?[0-9]+)\]\s*\[Other\s+([0-9]*\.?[0-9]+)\]\s*\[PROCESS\s+([0-9]*\.?[0-9]+)\]")
+PATTERN_TOKEN_PREFILL = re.compile(r"Prefill Token:\s*this=([0-9]*\.?[0-9]+)")
+PATTERN_TOKEN_DECODE = re.compile(r"Decode Token:\s*this=([0-9]*\.?[0-9]+)")
+PATTERN_KVN = re.compile(r"\[KV\s+([0-9]*\.?[0-9]+)\s*/\s*([0-9]*\.?[0-9]+)\]")
+PATTERN_KVO = re.compile(r"\[KV\s+([0-9]*\.?[0-9]+)\s*\]")
 
 
-def find_ttft_matches(text: str) -> List[Tuple[float, float]]:
-    """返回每个匹配的 (init, prefill) 列表（TTFT 模式）。"""
-    results = []
+def find_ttft_matches(text: str) -> List[Tuple[Any, Any, Any]]:
+    """返回每个匹配的 (init, prefill, reqs) 列表（TTFT 模式）。
+
+    如果日志行包含 `[Reqs N]` 则第三项为整数 N，否则为 None。
+    """
+    results: List[Tuple[Any, Any, Any]] = []
     for m in PATTERN_TTFT.finditer(text):
         try:
             init_v = float(m.group(1))
             prefill_v = float(m.group(2))
-            results.append((init_v, prefill_v))
         except Exception:
             continue
+        reqs_v = None
+        try:
+            if m.lastindex and m.lastindex >= 3 and m.group(3) is not None:
+                reqs_v = int(m.group(3))
+        except Exception:
+            reqs_v = None
+        results.append((init_v, prefill_v, reqs_v))
     return results
 
 
@@ -90,26 +104,70 @@ def find_lora_matches(text: str) -> List[Tuple[float, float]]:
     return results
 
 
-def find_prepare_matches(text: str) -> List[Tuple[float, float, float, float, float]]:
-    """返回每个匹配的 (prepare, prefill, other, process, kv) 列表（PREPARE 模式）。"""
-    results = []
+def find_prepare_matches(text: str) -> List[Tuple[float, float, float, float]]:
+    """返回每个匹配的 (prepare, prefill, other, process) 列表（PREPARE 模式）。
+
+    不再匹配或返回 KV 字段。
+    """
+    results: List[Tuple[float, float, float, float]] = []
     for m in PATTERN_PREPARE.finditer(text):
         try:
             prepare_v = float(m.group(1))
             prefill_v = float(m.group(2))
             other_v = float(m.group(3))
             process_v = float(m.group(4))
-            kv_v = float(m.group(5))
-            results.append((prepare_v, prefill_v, other_v, process_v, kv_v))
+            results.append((prepare_v, prefill_v, other_v, process_v))
         except Exception:
             continue
     return results
 
 
-def find_token_matches(text: str) -> List[float]:
-    """返回 Prefill Token 模式下每个匹配的 this 值列表。"""
-    results = []
-    for m in PATTERN_TOKEN.finditer(text):
+def find_token_matches(text: str) -> List[Tuple[Any, Any]]:
+    """返回每行中 Prefill Token 和 Decode Token 的 this 值对列表。
+
+    每个元素为 (prefill_this, decode_this)，如果某一项缺失则为 None。
+    这样可以按原有的分组逻辑把记录按行顺序分块，每条记录包含两项可能的值。
+    """
+    results: List[Tuple[Any, Any]] = []
+    for line in text.splitlines():
+        pre = None
+        dec = None
+        m1 = PATTERN_TOKEN_PREFILL.search(line)
+        if m1:
+            try:
+                pre = float(m1.group(1))
+            except Exception:
+                pre = None
+        m2 = PATTERN_TOKEN_DECODE.search(line)
+        if m2:
+            try:
+                dec = float(m2.group(1))
+            except Exception:
+                dec = None
+
+        if m1 or m2:
+            results.append((pre, dec))
+
+    return results
+
+
+def find_kvn_matches(text: str) -> List[Tuple[float, float]]:
+    """返回每个匹配的 (before, after) 列表，例如匹配 `[KV 0.2197161439 / 0.194054]`。"""
+    results: List[Tuple[float, float]] = []
+    for m in PATTERN_KVN.finditer(text):
+        try:
+            a = float(m.group(1))
+            b = float(m.group(2))
+            results.append((a, b))
+        except Exception:
+            continue
+    return results
+
+
+def find_kvo_matches(text: str) -> List[float]:
+    """返回每个匹配的 kv 单值列表，例如匹配 `[KV 0.445417]`。"""
+    results: List[float] = []
+    for m in PATTERN_KVO.finditer(text):
         try:
             v = float(m.group(1))
             results.append(v)
@@ -216,6 +274,10 @@ def main():
         modes_to_run.append('prepare')
     if args.token:
         modes_to_run.append('token')
+    if args.kvn:
+        modes_to_run.append('kvn')
+    if args.kvo:
+        modes_to_run.append('kvo')
     if not modes_to_run:
         modes_to_run.append('ttft')
 
@@ -238,6 +300,10 @@ def main():
             records = find_lora_matches(text)
         elif mode == 'prepare':
             records = find_prepare_matches(text)
+        elif mode == 'kvn':
+            records = find_kvn_matches(text)
+        elif mode == 'kvo':
+            records = find_kvo_matches(text)
         else:
             records = []
 
@@ -291,15 +357,24 @@ def main():
         selected_group_count = len([g for g in selected_groups if g])
 
         # 根据模式执行对应的聚合和输出（保留原有行为，但使用 precomputed groups）
+
         if mode == 'ttft':
             init_sum = prefill_sum = 0.0
             init_count = prefill_count = 0
+            reqs_sum = 0
+            reqs_count = 0
             for g in selected_groups:
-                for (init_v, prefill_v) in g:
+                for (init_v, prefill_v, reqs_v) in g:
                     init_sum += init_v
                     prefill_sum += prefill_v
                     init_count += 1
                     prefill_count += 1
+                    if reqs_v is not None:
+                        try:
+                            reqs_sum += int(reqs_v)
+                            reqs_count += 1
+                        except Exception:
+                            pass
 
             total_sum = init_sum + prefill_sum
             total_entries = init_count + prefill_count
@@ -320,6 +395,14 @@ def main():
             else:
                 print('Prefill 平均: 无可用条目')
 
+            # Reqs 统计
+            print('\nReqs 总和:', reqs_sum)
+            print('Reqs 条目数:', reqs_count)
+            if reqs_count > 0:
+                print('Reqs 平均 (reqs_sum / reqs_count):', reqs_sum / reqs_count)
+            else:
+                print('Reqs 平均: 无可用条目')
+
             denom = selected_group_count * n if selected_group_count > 0 else None
             if denom:
                 avg_normalized = total_sum / denom
@@ -330,25 +413,48 @@ def main():
                 print('按 (selected_group_count * n) 归一化平均: 无可用组')
 
         elif mode == 'token':
-            tok_sum = 0.0
-            tok_count = 0
+            # 每条记录为 (prefill_this, decode_this)
+            prefill_sum = decode_sum = 0.0
+            prefill_count = decode_count = 0
             for g in selected_groups:
-                for v in g:
-                    tok_sum += float(v)
-                    tok_count += 1
+                for (pre, dec) in g:
+                    if pre is not None:
+                        prefill_sum += pre
+                        prefill_count += 1
+                    if dec is not None:
+                        decode_sum += dec
+                        decode_count += 1
+
+            total_sum = prefill_sum + decode_sum
+            total_entries = prefill_count + decode_count
 
             print('\n统计范围: 组', selected_group_indices)
             print('选中组中非空组数:', selected_group_count)
-            print('\nToken this 总和:', tok_sum)
-            print('Token this 条目数:', tok_count)
-            if tok_count > 0:
-                print('Token this 平均 (tok_sum / tok_count):', tok_sum / tok_count)
+            print('\nPrefill Token this 总和:', prefill_sum)
+            print('Prefill Token this 条目数:', prefill_count)
+            if prefill_count > 0:
+                print('Prefill Token this 平均 (prefill_sum / prefill_count):', prefill_sum / prefill_count)
             else:
-                print('Token this 平均: 无可用条目')
+                print('Prefill Token this 平均: 无可用条目')
+
+            print('\nDecode Token this 总和:', decode_sum)
+            print('Decode Token this 条目数:', decode_count)
+            if decode_count > 0:
+                print('Decode Token this 平均 (decode_sum / decode_count):', decode_sum / decode_count)
+            else:
+                print('Decode Token this 平均: 无可用条目')
+
+            print('\n合计 数值总和:', total_sum)
+            print('合计 条目数:', total_entries)
+            if total_entries > 0:
+                print('按条目平均 (total_sum / total_entries):', total_sum / total_entries)
+            else:
+                print('按条目平均: 无可用条目')
 
             denom = selected_group_count * n if selected_group_count > 0 else None
             if denom:
-                print('按 (selected_group_count * n) 归一化 Token 平均 (tok_sum / denom):', tok_sum / denom)
+                print('按 (selected_group_count * n) 归一化 Prefill Token 平均 (prefill_sum / denom):', prefill_sum / denom)
+                print('按 (selected_group_count * n) 归一化 Decode Token 平均 (decode_sum / denom):', decode_sum / denom)
             else:
                 print('按 (selected_group_count * n) 归一化平均: 无可用组')
 
@@ -438,24 +544,99 @@ def main():
             else:
                 print('按 (selected_group_count * n) 归一化平均: 无可用组')
 
-        elif mode == 'prepare':
-            prepare_sum = prefill_sum = other_sum = process_sum = kv_sum = 0.0
-            prepare_count = prefill_count = other_count = process_count = kv_count = 0
+        elif mode == 'kvn':
+            # 每条记录为 (before, after)
+            before_sum = after_sum = 0.0
+            before_count = after_count = 0
             for g in selected_groups:
-                for (prepare_v, prefill_v, other_v, process_v, kv_v) in g:
+                for (bef, aft) in g:
+                    try:
+                        before_sum += float(bef)
+                        before_count += 1
+                    except Exception:
+                        pass
+                    try:
+                        after_sum += float(aft)
+                        after_count += 1
+                    except Exception:
+                        pass
+
+            total_sum = before_sum + after_sum
+            total_entries = before_count + after_count
+
+            print('\n统计范围: 组', selected_group_indices)
+            print('选中组中非空组数:', selected_group_count)
+            print('\nKV (before) 总和:', before_sum)
+            print('KV (before) 条目数:', before_count)
+            if before_count > 0:
+                print('KV (before) 平均 (before_sum / before_count):', before_sum / before_count)
+            else:
+                print('KV (before) 平均: 无可用条目')
+
+            print('\nKV (after) 总和:', after_sum)
+            print('KV (after) 条目数:', after_count)
+            if after_count > 0:
+                print('KV (after) 平均 (after_sum / after_count):', after_sum / after_count)
+            else:
+                print('KV (after) 平均: 无可用条目')
+
+            print('\n合计 数值总和:', total_sum)
+            print('合计 条目数:', total_entries)
+            if total_entries > 0:
+                print('按条目平均 (total_sum / total_entries):', total_sum / total_entries)
+            else:
+                print('按条目平均: 无可用条目')
+
+            denom = selected_group_count * n if selected_group_count > 0 else None
+            if denom:
+                print('按 (selected_group_count * n) 归一化 KV (before) 平均 (before_sum / denom):', before_sum / denom)
+                print('按 (selected_group_count * n) 归一化 KV (after) 平均 (after_sum / denom):', after_sum / denom)
+            else:
+                print('按 (selected_group_count * n) 归一化平均: 无可用组')
+
+        elif mode == 'kvo':
+            # 每条记录为单个 kv 值
+            kv_sum = 0.0
+            kv_count = 0
+            for g in selected_groups:
+                for v in g:
+                    try:
+                        kv_sum += float(v)
+                        kv_count += 1
+                    except Exception:
+                        pass
+
+            print('\n统计范围: 组', selected_group_indices)
+            print('选中组中非空组数:', selected_group_count)
+            print('\nKV 总和:', kv_sum)
+            print('KV 条目数:', kv_count)
+            if kv_count > 0:
+                print('KV 平均 (kv_sum / kv_count):', kv_sum / kv_count)
+            else:
+                print('KV 平均: 无可用条目')
+
+            denom = selected_group_count * n if selected_group_count > 0 else None
+            if denom:
+                print('按 (selected_group_count * n) 归一化 KV 平均 (kv_sum / denom):', kv_sum / denom)
+            else:
+                print('按 (selected_group_count * n) 归一化平均: 无可用组')
+
+        elif mode == 'prepare':
+            prepare_sum = prefill_sum = other_sum = process_sum = 0.0
+            prepare_count = prefill_count = other_count = process_count = 0
+            for g in selected_groups:
+                for (prepare_v, prefill_v, other_v, process_v) in g:
                     prepare_sum += prepare_v
                     prefill_sum += prefill_v
                     other_sum += other_v
                     process_sum += process_v
-                    kv_sum += kv_v
                     prepare_count += 1
                     prefill_count += 1
                     other_count += 1
                     process_count += 1
-                    kv_count += 1
 
-            total_sum = prepare_sum + prefill_sum + other_sum + process_sum + kv_sum
-            total_entries = prepare_count + prefill_count + other_count + process_count + kv_count
+            total_sum = prepare_sum + prefill_sum + other_sum + process_sum
+            total_entries = prepare_count + prefill_count + other_count + process_count
 
             print('\n统计范围: 组', selected_group_indices)
             print('选中组中非空组数:', selected_group_count)
@@ -487,13 +668,6 @@ def main():
             else:
                 print('Process 平均: 无可用条目')
 
-            print('\nKV 总和:', kv_sum)
-            print('KV 条目数:', kv_count)
-            if kv_count > 0:
-                print('KV 平均 (kv_sum / kv_count):', kv_sum / kv_count)
-            else:
-                print('KV 平均: 无可用条目')
-
             print('\n合计 数值总和:', total_sum)
             print('合计 条目数:', total_entries)
             if total_entries > 0:
@@ -507,7 +681,6 @@ def main():
                 print('按 (selected_group_count * n) 归一化 Prefill 平均 (prefill_sum / denom):', prefill_sum / denom)
                 print('按 (selected_group_count * n) 归一化 Other 平均 (other_sum / denom):', other_sum / denom)
                 print('按 (selected_group_count * n) 归一化 Process 平均 (process_sum / denom):', process_sum / denom)
-                print('按 (selected_group_count * n) 归一化 KV 平均 (kv_sum / denom):', kv_sum / denom)
             else:
                 print('按 (selected_group_count * n) 归一化平均: 无可用组')
 
