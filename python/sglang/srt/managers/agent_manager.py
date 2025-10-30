@@ -23,6 +23,10 @@ class AgentManager:
         with self.lock:
             self.update_dict_agent = update_dict_agent
             self.update_dict_timestep = update_dict_timestep
+            print("==================agent")
+            print(self.update_dict_agent)
+            print("==================timestep")
+            print(self.update_dict_timestep)
         if self.update_dict_agent is None or len(self.update_dict_agent) == 0:
             logger.error("\033[91mupdate_dict_agent is None or empty\033[0m")
         if self.update_dict_timestep is None or len(self.update_dict_timestep) == 0:

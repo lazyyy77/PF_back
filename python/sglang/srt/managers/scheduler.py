@@ -2881,7 +2881,7 @@ class Scheduler(
                 if recv_req is None:
                     logger.error("Received None for agent timestep update request")
                     return
-                # print(f"Received agent timestep update request: {recv_req.agent_data}, {recv_req.timestep_data}, {recv_req.timestep_cnt}")
+                print(f"Received agent timestep update request: {recv_req.agent_data}, {recv_req.timestep_data}, {recv_req.timestep_cnt}")
                 self.agent_manager.update_agent_timestep(recv_req.agent_data, recv_req.timestep_data)
                 self.tree_cache._update_leaf_node_timestep()
                 # if self.server_args.enable_hierarchical_cache:
@@ -2889,9 +2889,10 @@ class Scheduler(
                 # else:
                 #     self.tree_cache.pretty_print()
                 logger.critical(f"\033[94m UPDATE \033[0m: Activate Agent: {self.activate_agent}, Prefetch Agent: {self.prefetch_agent}, Prefetch LoRA: {self.prefetch_lora}")
-                kv_before = self.tree_cache.cache_controller.get_and_update_load_time()
+                if self.server_args.enable_hierarchical_cache:
+                    kv_before = self.tree_cache.cache_controller.get_and_update_load_time()
                 if not self.server_args.disable_prefetch:
-                    self.prefetch_agent_timestep(prefetch_step=self.server_args.load_ahead_step)
+                    self.prefetch_agent_timestep(2)
                 last_update_time = self.last_update_time
                 end_time = time.time()                
                 lasting_time = end_time - last_update_time
