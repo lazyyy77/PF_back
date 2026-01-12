@@ -2892,7 +2892,7 @@ class Scheduler(
                 if self.server_args.enable_hierarchical_cache:
                     kv_before = self.tree_cache.cache_controller.get_and_update_load_time()
                 if not self.server_args.disable_prefetch:
-                    self.prefetch_agent_timestep(2)
+                    self.prefetch_agent_timestep(3)
                 last_update_time = self.last_update_time
                 end_time = time.time()                
                 lasting_time = end_time - last_update_time

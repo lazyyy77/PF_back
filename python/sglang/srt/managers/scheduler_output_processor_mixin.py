@@ -832,10 +832,10 @@ class SchedulerOutputProcessorMixin:
                                 dv_indices = self.tree_cache.load_back(n, priority=step+1, check_reserve=True)
                                 if dv_indices is None:
                                     to_break = True
-                                elif agent_id not in agent_prefetch_statistic:
-                                    agent_prefetch_statistic[agent_id] = len(dv_indices)
-                                else:
-                                    agent_prefetch_statistic[agent_id] += len(dv_indices)
+                                # elif agent_id not in agent_prefetch_statistic:
+                                #     agent_prefetch_statistic[agent_id] = len(dv_indices)
+                                # else:
+                                #     agent_prefetch_statistic[agent_id] += len(dv_indices)
 
                             # bug = False
                             # while n != self.tree_cache.root_node:

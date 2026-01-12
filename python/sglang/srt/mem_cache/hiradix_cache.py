@@ -263,7 +263,7 @@ class HiRadixCache(RadixCache):
     def evict(self, num_tokens: int):
         num_evicted = 0
         # steps = self.agent_manager.hold_step - 1
-        steps = 1
+        steps = 3
         while num_evicted < num_tokens and steps > 0:
             num_evicted += self._evict_helper(num_tokens, ignore_holding=False, steps=steps)
             steps -= 1
