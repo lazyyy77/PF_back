@@ -80,10 +80,12 @@ class LoRATreeNode:
         # For PFEngine
         # Each node's corresponding agents is represented as a str index dict: 
         # (agent_id: str, priority: float, hit_cnt: int, last_call_time: int, continue_call: int)
-        self.agents: dict[str, AgentInfo] = {}
+        # self.agents: dict[str, AgentInfo] = {}
+        self.agents: dict[str, str] = {}
         self.cache = cache
         self.ignore_holding = ignore_holding
         self.hold_priority = 0
+        self.hold_priority_version: int = -1
 
     @property
     def _hold_priority(self):
@@ -426,6 +428,7 @@ class LoRARadixCache(BasePrefixCache):
         child.key = key_split_2
         child.value = child.value[split_len:]
         new_node.parent.children[self.get_child_key_fn(key)] = new_node
+        new_node.hold_priority_version = -1
         
         self._record_store_event(new_node)
         self._record_store_event(child)
@@ -463,6 +466,7 @@ class LoRARadixCache(BasePrefixCache):
             node.children[child_key] = new_node
             self.evictable_size_ += len(value)
             new_node.agents = copy.deepcopy(node.agents)
+            new_node.hold_priority_version = -1
             self._record_store_event(new_node)
         
         assert len(node.key) == len(node.value)
@@ -616,21 +620,23 @@ class LoRARadixCache(BasePrefixCache):
         self._update_agent_to_last_nodes(req, last_node)
         n = last_node
         if agent_id not in n.agents:
-            n.agents[agent_id] = AgentInfo(
-                agent_id=agent_id,
-                priority=0.0,
-                hit_cnt=0,
-                last_call_time=time.time(),
-                continue_call=0
-            )
-        n.agents[agent_id].hit_cnt += 1
-        if self.agent_manager.agent_last_node_id == n.id:
-            n.agents[agent_id].continue_call += 1
-        else:
-            n.agents[agent_id].continue_call = 1
-        self.agent_manager.agent_last_node_id = n.id
-        n.agents[agent_id].last_call_time = time.time()
-        n.agents[agent_id].update_priority()
+            n.agents[agent_id] = str(agent_id)
+            n.hold_priority_version = -1
+        #     n.agents[agent_id] = AgentInfo(
+        #         agent_id=agent_id,
+        #         priority=0.0,
+        #         hit_cnt=0,
+        #         last_call_time=time.time(),
+        #         continue_call=0
+        #     )
+        # n.agents[agent_id].hit_cnt += 1
+        # if self.agent_manager.agent_last_node_id == n.id:
+        #     n.agents[agent_id].continue_call += 1
+        # else:
+        #     n.agents[agent_id].continue_call = 1
+        # self.agent_manager.agent_last_node_id = n.id
+        # n.agents[agent_id].last_call_time = time.time()
+        # n.agents[agent_id].update_priority()
 
     def _update_leaf_node_timestep(self):
         leaves = self._collect_leaves()
@@ -644,6 +650,7 @@ class LoRARadixCache(BasePrefixCache):
                 if agent_id in leaf.agents:
                     leaf.hold_priority = min(leaf.hold_priority, update_dict[agent_id])
                     update_log.append({"id": leaf.id, "old_priority": old_priority, "new_priority": leaf.hold_priority, "agent_id": agent_id, "agent_priority": update_dict[agent_id]})
+            leaf.hold_priority_version = self.agent_manager.update_version
         logger.debug(f"[leaves][after] {update_log}")
         logger.info("[Hold][Update] Leaf node priorities updated.")
         return

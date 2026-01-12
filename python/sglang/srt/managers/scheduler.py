@@ -2883,7 +2883,7 @@ class Scheduler(
                     return
                 print(f"Received agent timestep update request: {recv_req.agent_data}, {recv_req.timestep_data}, {recv_req.timestep_cnt}")
                 self.agent_manager.update_agent_timestep(recv_req.agent_data, recv_req.timestep_data)
-                self.tree_cache._update_leaf_node_timestep()
+                # self.tree_cache._update_leaf_node_timestep()
                 # if self.server_args.enable_hierarchical_cache:
                 #     self.tree_cache.hi_pretty_print(node=self.tree_cache.root_node, indent=0)
                 # else:

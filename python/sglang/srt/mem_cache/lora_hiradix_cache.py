@@ -264,7 +264,7 @@ class LoRAHiRadixCache(LoRARadixCache):
     def evict(self, num_tokens: int):
         num_evicted = 0
         # steps = self.agent_manager.hold_step - 1
-        steps = 1
+        steps = 3
         while num_evicted < num_tokens and steps > 0:
             num_evicted += self._evict_helper(num_tokens, ignore_holding=False, steps=steps)
             steps -= 1
@@ -273,19 +273,20 @@ class LoRAHiRadixCache(LoRARadixCache):
 
     def _evict_helper(self, num_tokens: int, ignore_holding: bool = False, steps: int = 1):
         leaves = self._collect_leaves_device()
-        heapq.heapify(leaves)
+        # heapq.heapify(leaves)
 
         num_evicted = 0
         write_back_nodes = []
         while num_evicted < num_tokens and len(leaves):
-            x = heapq.heappop(leaves)
+            # x = heapq.heappop(leaves)
+            x = leaves.pop()
 
             if x.lock_ref > 0 or x.loading:
                 continue
 
             if ignore_holding is False:
-                _, priority = self.agent_manager.get_agents_hold_priority(list(x.agents.keys()))
-                if priority > steps:
+                _, priority = self.agent_manager.get_node_hold_priority(x)
+                if priority < steps:
                     continue
 
             if not x.backuped:
@@ -306,7 +307,8 @@ class LoRAHiRadixCache(LoRARadixCache):
                     break
             else:
                 # all children are evicted or no children
-                heapq.heappush(leaves, x.parent)
+                # heapq.heappush(leaves, x.parent)
+                leaves.append(x.parent)
 
         if len(leaves) == 0:
             logger.warning("\033[33m [Evict][all] No more leaves to evict \033[0m")
@@ -935,6 +937,7 @@ class LoRAHiRadixCache(LoRARadixCache):
                 if agent_id in leaf.agents:
                     leaf.hold_priority = min(leaf.hold_priority, update_dict[agent_id])
                     update_log.append({"id": leaf.id, "hold_priority": leaf.hold_priority, "agent_id": agent_id, "agent_priority": update_dict[agent_id]})
+            leaf.hold_priority_version = self.agent_manager.update_version
         logger.debug(f"[leaves][after] {update_log}")
         logger.info("[Hold][Update] Leaf node priorities updated.")
         return
