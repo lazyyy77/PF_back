@@ -763,23 +763,22 @@ class SchedulerOutputProcessorMixin:
         )
 
     def prefetch_agent_timestep(self, prefetch_step: Optional[int] = None):
-        # self.tree_cache.cache_controller._clear_outdated_operations(2)
+        self.tree_cache.cache_controller._clear_outdated_operations(2)
         print(f"\033[95m[Prefetch] Updating LoRA priority before prefetching...\033[0m")
         self.lora_manager.memory_pool.update_lora_priority()
         print(f"\033[95m[Prefetch] LoRA priority updated.\033[0m")
         self.prefetch_agent = set()
         self.prefetch_lora = set()
-        # self.tree_cache.check_hicache_events()
+        self.tree_cache.check_hicache_events()
         print(f"\033[95m[Prefetch] Starting prefetch_agent_timestep...\033[0m")
         if self.agent_manager.update_dict_timestep is None:
             logger.warning("\033[91m update_dict_timestep is None\033[0m")
             return
         print(f"\033[95m[Prefetch] update_dict_timestep: {self.agent_manager.update_dict_timestep}\033[0m")
-        # p_step = prefetch_step if prefetch_step is not None else self.agent_manager.prefetch_step
-        p_step = 2
+        p_step = prefetch_step if prefetch_step is not None else self.agent_manager.prefetch_step
         lora_names = []
-        # lora_names.append("lora0")
-        # self.prefetch_lora.add("lora0")
+        lora_names.append("lora0")
+        self.prefetch_lora.add("lora0")
         print(f"\033[95m[Prefetch] Start prefetching up to step: {p_step}\033[0m")
         try:
             for step in range(0, p_step+1):
@@ -791,10 +790,10 @@ class SchedulerOutputProcessorMixin:
                 if agent_ids is None or len(agent_ids) == 0:
                     logger.critical("\033[95m [Prefetch] step: %s, no agent_ids found\033[0m", step)
                     continue
-                # for agent_id in agent_ids:
-                #     lora_names.append(f"lora{agent_id}" if int(agent_id) > 0 else "lora0")
-                # logger.warning(f"[pf = {step}] agent_ids: {agent_ids}, lora_names: {lora_names}")
-                # agent_prefetch_statistic = {}
+                for agent_id in agent_ids:
+                    lora_names.append(f"lora{agent_id}" if int(agent_id) > 0 else "lora0")
+                logger.warning(f"[pf = {step}] agent_ids: {agent_ids}, lora_names: {lora_names}")
+                agent_prefetch_statistic = {}
 
                 for agent_id in agent_ids:
                     to_break = False
@@ -806,7 +805,7 @@ class SchedulerOutputProcessorMixin:
                             lora_name = "lora0"
                         to_break = not self.prefetch_lora_timesteps(lora_name, priority=step, step_lora_names=lora_names)
                         if not to_break:
-                            # agent_prefetch_statistic[agent_id] = True
+                            agent_prefetch_statistic[agent_id] = True
                             self.prefetch_lora.add(lora_name)
 
                     if self.server_args.disable_kv_pf is not True:
@@ -832,10 +831,10 @@ class SchedulerOutputProcessorMixin:
                                 dv_indices = self.tree_cache.load_back(n, priority=step+1, check_reserve=True)
                                 if dv_indices is None:
                                     to_break = True
-                                # elif agent_id not in agent_prefetch_statistic:
-                                #     agent_prefetch_statistic[agent_id] = len(dv_indices)
-                                # else:
-                                #     agent_prefetch_statistic[agent_id] += len(dv_indices)
+                                elif agent_id not in agent_prefetch_statistic:
+                                    agent_prefetch_statistic[agent_id] = len(dv_indices)
+                                else:
+                                    agent_prefetch_statistic[agent_id] += len(dv_indices)
 
                             # bug = False
                             # while n != self.tree_cache.root_node:
