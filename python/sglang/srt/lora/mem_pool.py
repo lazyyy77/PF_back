@@ -496,6 +496,18 @@ class LoRAMemoryPool:
             #     slot.priority -= 1
             #     if slot.priority < 0:
             #         slot.priority = 1000
+
+    def mark_lora_for_eviction(self, lora_id: Optional[str], priority: int = 1000):
+        """Raise the priority of a finished request's LoRA to make it the first eviction candidate."""
+        if lora_id is None:
+            return False
+        if lora_id not in self.uid_to_buffer_id:
+            return False
+        buffer_id = self.uid_to_buffer_id[lora_id]
+        # Higher priority value means more likely to be evicted in get_available_buffer_slot.
+        self.buffer_id_to_uid[buffer_id].priority = priority
+        logger.warning(f"[lora][priority] Marking LoRA {lora_id} in buffer slot {buffer_id} for eviction with priority {priority}")
+        return True
             
     def print_buffer_status(self):
         buffer = []

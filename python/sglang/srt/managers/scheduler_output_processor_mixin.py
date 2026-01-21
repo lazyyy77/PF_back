@@ -281,11 +281,18 @@ class SchedulerOutputProcessorMixin:
                 decode_tokens = len(req.output_ids)
                 if prefill_tokens > 0:
                     ratio = decode_tokens / prefill_tokens
-                    logger.warning(f"\033[38;5;208m [Decode] \033[0m [rid={req.rid}] Prefill tokens: {prefill_tokens}, Decode tokens: {decode_tokens}, Ratio: {ratio:.2f}")
+                    logger.warning(f"\033[38;5;208m [Decode] \033[0m [aid={req.agent_id}][rid={req.rid}] Prefill tokens: {prefill_tokens}, Decode tokens: {decode_tokens}, Ratio: {ratio:.2f}")
                 else:
-                    logger.warning(f"\033[38;5;208m [Decode] \033[0m [rid={req.rid}] Prefill tokens: {prefill_tokens}, Decode tokens: {decode_tokens}, Ratio: inf")
+                    logger.warning(f"\033[38;5;208m [Decode] \033[0m [aid={req.agent_id}][rid={req.rid}] Prefill tokens: {prefill_tokens}, Decode tokens: {decode_tokens}, Ratio: inf")
                 self.tree_cache.cache_finished_req(req)
                 self.tree_cache._update_leaf_node_priority(req, req.last_node)
+                if self.enable_lora:
+                    try:
+                        # Make the finished request's LoRA the first candidate for eviction to reduce churn on others.
+                        success = self.lora_manager.memory_pool.mark_lora_for_eviction(req.lora_id)
+                        logger.warning(f"[lora][priority][success={success}] Marked lora {req.lora_id} for eviction")
+                    except Exception as e:
+                        logger.debug(f"[lora][priority] failed to mark lora {req.lora_id} for eviction: {e}")
                 req.time_stats.completion_time = time.time()
 
             if req.return_logprob and batch.spec_algorithm.is_none():
@@ -807,6 +814,10 @@ class SchedulerOutputProcessorMixin:
                         if not to_break:
                             agent_prefetch_statistic[agent_id] = True
                             self.prefetch_lora.add(lora_name)
+                        else:
+                            to_break = True
+                            break
+                            
 
                     if self.server_args.disable_kv_pf is not True:
                         last_nodes = self.agent_manager.agent_to_last_nodes.get(agent_id, [])

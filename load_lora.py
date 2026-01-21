@@ -1,10 +1,10 @@
 import requests
 
 
-url = "http://127.0.0.1:8011"
+url = "http://127.0.0.1:8001"
 lora_path = "qingpingwan/Qwen2.5-7B-Lora-Law"
 # lora_path = "yis77/lora32b"
-agent_num = 100
+agent_num = 500
 
 for i in range(agent_num + 1):
     lora_name = f"lora{i}"

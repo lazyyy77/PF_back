@@ -309,6 +309,7 @@ class Scheduler(
         self.last_time_gpu_start = 0
         self.last_time_gpu_end = 0
         self.last_prepare_lora_time = 0
+        self.agent_call_time = 0
         
         self.time_start = -1
         self.idle_start_time = 0
@@ -1872,7 +1873,30 @@ class Scheduler(
             prefix_computed = True
 
         # Get requests from the waiting queue to a new prefill batch
-        for req in self.waiting_queue:
+        waiting_queue_iter = self.waiting_queue
+        if self.enable_lora:
+            # Prioritize requests whose LoRA weights are already in GPU slots.
+            lora_memory_pool = self.lora_manager.memory_pool
+            loaded_lora_ids = lora_memory_pool.uid_to_buffer_id.keys()
+            
+            def _req_lora_id(req: Req):
+                if getattr(req, "lora_id", None) is not None:
+                    return req.lora_id
+                lora_name = f"lora{req.agent_id}" if req.agent_id is not None else None
+                if lora_name is not None:
+                    return self.lora_registry.get(lora_name)
+                return None
+
+            waiting_in_slot, waiting_not_in_slot = [], []
+            for req in self.waiting_queue:
+                lora_id = _req_lora_id(req)
+                if lora_id is not None and lora_id in loaded_lora_ids:
+                    waiting_in_slot.append(req)
+                else:
+                    waiting_not_in_slot.append(req)
+            waiting_queue_iter = waiting_in_slot + waiting_not_in_slot
+
+        for req in waiting_queue_iter:
             
             if self.enable_lora and not self.tp_worker.can_run_lora_batch(
                 lora_set
@@ -1908,11 +1932,15 @@ class Scheduler(
             if self.tree_cache is not None and self.enable_hierarchical_cache:
                 self.tree_cache.ready_to_load_host_cache() # TODO whether or not to do this? -> MUST DO IT!  enable layer?
                 loading_status = self.tree_cache.get_node_chain_status(req.last_host_node)
-                logger.warning(f"Request {req.rid} Node {req.last_host_node.id} evicted {req.last_host_node.evicted} loading {req.last_host_node.loading} loading status: {loading_status}")
+                if self.agent_call_time == 0:
+                    self.agent_call_time = time.perf_counter()
+                logger.warning(f"[aid: {req.agent_id}][len {len(waiting_queue_iter)}][time: {time.perf_counter() - self.agent_call_time:.4f}] Request {req.rid} Node {req.last_host_node.id} evicted {req.last_host_node.evicted} loading {req.last_host_node.loading} loading status: {loading_status}")
                 if loading_status == self.tree_cache.REQ_IS_EVICTED:
+                    logger.warning(f"=-=-=-=-=-[Scheduler][Load Back][Evict] Request {req.rid} Node {req.last_host_node.id}")
                     self.tree_cache.load_back(req.last_host_node, priority=0, check_reserve=True)
                     continue
                 elif loading_status == self.tree_cache.REQ_IS_LOADING:
+                    logger.warning(f"=-=-=-=-=-[Scheduler][Load Back][Loading] Request {req.rid} Node {req.last_host_node.id}")
                     continue
 
             res = adder.add_one_req(req, has_chunked_req=(self.chunked_req is not None))
@@ -2883,7 +2911,9 @@ class Scheduler(
                     return
                 print(f"Received agent timestep update request: {recv_req.agent_data}, {recv_req.timestep_data}, {recv_req.timestep_cnt}")
                 self.agent_manager.update_agent_timestep(recv_req.agent_data, recv_req.timestep_data)
-                # self.tree_cache._update_leaf_node_timestep()
+                print(f"Updated agent timestep data: {recv_req.agent_data}, {recv_req.timestep_data}, {recv_req.timestep_cnt}")
+                self.tree_cache._update_leaf_node_timestep()
+                print(f"Updated leaf node timestep data: {recv_req.agent_data}, {recv_req.timestep_data}, {recv_req.timestep_cnt}")
                 # if self.server_args.enable_hierarchical_cache:
                 #     self.tree_cache.hi_pretty_print(node=self.tree_cache.root_node, indent=0)
                 # else:
@@ -2937,6 +2967,7 @@ class Scheduler(
                 self.req_prefill_ttft.clear()
                 self.new_timestep = True
                 self.req_nums = 0
+                self.agent_call_time = 0
                 logger.critical("\033[95m   [BD] Timestep End, Stop to Count   \033[0m")
             except Exception as e:
                 logger.error(f"Failed to update agent timesteps: {e}")
