@@ -230,7 +230,7 @@ class LoRAMemoryPool:
                 if self.buffer_id_to_uid[buffer_id].uid == EMPTY_SLOT:
                     return buffer_id
             logger.info("[lora][prefetch]  no enough slot for lora, need to evict")
-            target_priority, target_buffer_id, target_slot_id = -1, -1, -1
+            target_priority, target_buffer_id, target_slot_id, target_slot_status = -1, -1, -1, 0
             try:
                 for buffer_id in range(0, self.max_loras_per_batch):
                     slot = self.buffer_id_to_uid[buffer_id]
@@ -246,6 +246,7 @@ class LoRAMemoryPool:
                         target_priority = slot.priority
                         target_buffer_id = buffer_id
                         target_slot_id = slot.uid
+                        target_slot_status = slot.status
                     
                     # name = self._lora_registry.get(slot.uid, slot.uid) if self._lora_registry else slot.uid                
                     # if slot.uid not in step_lora_ids:
@@ -260,6 +261,9 @@ class LoRAMemoryPool:
                 
                 if target_slot_id != -1:
                     self.uid_to_buffer_id.pop(target_slot_id)
+                    # Best-effort removal of a pending load for this uid from the queue.
+                    if target_slot_status == BufferSlot.LOADING:
+                        self._drop_pending_load(target_slot_id)
                     name = self._lora_registry.get(target_slot_id) if self._lora_registry else target_slot_id
                     logger.critical(f"[lora][prefetch]  Evicting LoRA {name} from buffer slot {target_buffer_id}.")
                     self.buffer_id_to_uid[target_buffer_id].uid = EMPTY_SLOT
@@ -311,7 +315,7 @@ class LoRAMemoryPool:
                 if self.buffer_id_to_uid[buffer_id].uid == EMPTY_SLOT:
                     return buffer_id
             logger.info("[lora][prepare]  no enough slot for lora, need to evict")
-            target_priority, target_buffer_id, target_slot_id = -1, -1, -1
+            target_priority, target_buffer_id, target_slot_id, target_slot_status = -1, -1, -1, BufferSlot.READY
             try:
                 for buffer_id in range(0, self.max_loras_per_batch):
                     slot = self.buffer_id_to_uid[buffer_id]
@@ -321,13 +325,23 @@ class LoRAMemoryPool:
                         lora_ref = lora_refs.get(slot.uid)
                         if lora_ref is not None and lora_ref.pinned:
                             continue
-                    if target_priority < slot.priority:
+                    if (
+                        slot.priority > target_priority
+                        or (
+                            slot.priority == target_priority
+                            and slot.status == BufferSlot.LOADING
+                        )
+                    ):
                         target_priority = slot.priority
                         target_buffer_id = buffer_id
                         target_slot_id = slot.uid
+                        target_slot_status = slot.status
                         
                 if target_slot_id != -1:
                     self.uid_to_buffer_id.pop(target_slot_id)
+                    # If the victim is still queued for loading, drop the pending op to avoid writing back.
+                    if target_slot_status == BufferSlot.LOADING:
+                        self._drop_pending_load(target_slot_id)
                     name = self._lora_registry.get(target_slot_id) if self._lora_registry else target_slot_id
                     logger.critical(f"[lora][prepare]  Evicting LoRA {name} from buffer slot {target_buffer_id}.")
                     self.buffer_id_to_uid[target_buffer_id].uid = EMPTY_SLOT
@@ -463,6 +477,25 @@ class LoRAMemoryPool:
 
     def get_buffer_id(self, lora_uid: str):
         return self.uid_to_buffer_id[lora_uid]
+
+    def _drop_pending_load(self, lora_uid: Optional[str]):
+        """Remove queued load operations for a given uid, if any."""
+        if lora_uid is None:
+            return
+        # Hold the internal mutex to mutate the deque safely while the worker thread may be blocked on get().
+        with self.load_lora_queue.mutex:
+            q = self.load_lora_queue.queue
+            orig_len = len(q)
+            filtered = [op for op in q if op.uid != lora_uid]
+            removed = orig_len - len(filtered)
+            if removed == 0:
+                return
+            q.clear()
+            q.extend(filtered)
+            # Keep unfinished_tasks consistent so task_done() calls remain valid.
+            self.load_lora_queue.unfinished_tasks = max(
+                0, self.load_lora_queue.unfinished_tasks - removed
+            )
 
     def load_lora_cpu_to_gpu(self):
         with self.load_lora_stream:

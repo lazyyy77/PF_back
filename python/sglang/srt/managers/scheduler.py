@@ -1891,7 +1891,11 @@ class Scheduler(
             for req in self.waiting_queue:
                 lora_id = _req_lora_id(req)
                 if lora_id is not None and lora_id in loaded_lora_ids:
-                    waiting_in_slot.append(req)
+                    buffer_id = lora_memory_pool.uid_to_buffer_id[lora_id]
+                    if lora_memory_pool.buffer_id_to_uid[buffer_id].status == 0: # ready
+                        waiting_in_slot.append(req)
+                    # else: # loading  
+                    # waiting_in_slot.append(req)
                 else:
                     waiting_not_in_slot.append(req)
             waiting_queue_iter = waiting_in_slot + waiting_not_in_slot
