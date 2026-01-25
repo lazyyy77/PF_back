@@ -492,6 +492,7 @@ class LoRAMemoryPool:
                 return
             q.clear()
             q.extend(filtered)
+            logger.warning(f"[lora][prefetch][drop]  Dropped {removed} pending load(s) for LoRA {lora_uid} from the load queue.")
             # Keep unfinished_tasks consistent so task_done() calls remain valid.
             self.load_lora_queue.unfinished_tasks = max(
                 0, self.load_lora_queue.unfinished_tasks - removed
@@ -541,6 +542,20 @@ class LoRAMemoryPool:
         self.buffer_id_to_uid[buffer_id].priority = priority
         logger.warning(f"[lora][priority] Marking LoRA {lora_id} in buffer slot {buffer_id} for eviction with priority {priority}")
         return True
+
+    def list_loaded_lora_names(self) -> List[str]:
+        """Return the names of all LoRA adapters currently occupying memory pool slots."""
+        names: List[str] = []
+        seen: Set[Optional[str]] = set()
+        for buffer_id in sorted(self.buffer_id_to_uid.keys()):
+            uid = self.buffer_id_to_uid[buffer_id].uid
+            if uid in (EMPTY_SLOT, None):
+                continue
+            if uid in seen:
+                continue
+            seen.add(uid)
+            names.append(self._lora_registry.get(uid, uid) if self._lora_registry else uid)
+        return names
             
     def print_buffer_status(self):
         buffer = []

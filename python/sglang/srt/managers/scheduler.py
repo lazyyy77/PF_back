@@ -310,6 +310,7 @@ class Scheduler(
         self.last_time_gpu_end = 0
         self.last_prepare_lora_time = 0
         self.agent_call_time = 0
+        self.last_lora_pool = None
         
         self.time_start = -1
         self.idle_start_time = 0
@@ -1942,10 +1943,10 @@ class Scheduler(
                 if loading_status == self.tree_cache.REQ_IS_EVICTED:
                     logger.warning(f"=-=-=-=-=-[Scheduler][Load Back][Evict] Request {req.rid} Node {req.last_host_node.id}")
                     self.tree_cache.load_back(req.last_host_node, priority=0, check_reserve=True)
-                    continue
+                    # continue
                 elif loading_status == self.tree_cache.REQ_IS_LOADING:
                     logger.warning(f"=-=-=-=-=-[Scheduler][Load Back][Loading] Request {req.rid} Node {req.last_host_node.id}")
-                    continue
+                    # continue
 
             res = adder.add_one_req(req, has_chunked_req=(self.chunked_req is not None))
 
@@ -2922,7 +2923,19 @@ class Scheduler(
                 #     self.tree_cache.hi_pretty_print(node=self.tree_cache.root_node, indent=0)
                 # else:
                 #     self.tree_cache.pretty_print()
-                logger.critical(f"\033[94m UPDATE \033[0m: Activate Agent: {self.activate_agent}, Prefetch Agent: {self.prefetch_agent}, Prefetch LoRA: {self.prefetch_lora}")
+                activate_agent_list = sorted(self.activate_agent)
+                last_lora_pool_list = sorted(self.last_lora_pool) if self.last_lora_pool else []
+                missing_activate_agent_ids = [
+                    agent_id
+                    for agent_id in activate_agent_list
+                    if f"lora{agent_id}" not in last_lora_pool_list
+                ]
+                logger.critical(f"\033[94m UPDATE \033[0m: {len(activate_agent_list)} Activate Agent: {activate_agent_list}, Prefetch Agent: {self.prefetch_agent}, Prefetch LoRA: {self.prefetch_lora}")
+                logger.critical(f"\033[94m UPDATE \033[0m: Loaded Initial LoRA: {last_lora_pool_list}")
+                if missing_activate_agent_ids:
+                    logger.critical(
+                        f"\033[94m UPDATE \033[0m: Activate agents without loaded LoRA: {len(missing_activate_agent_ids)} {missing_activate_agent_ids}"
+                    )
                 if self.server_args.enable_hierarchical_cache:
                     kv_before = self.tree_cache.cache_controller.get_and_update_load_time()
                 if not self.server_args.disable_prefetch:
@@ -2950,6 +2963,7 @@ class Scheduler(
                 logger.critical(f"\033[94m UPDATE \033[0m:  [{lasting_time:.4f}s][{recv_req.timestep_cnt} ts] Updated timestep data: {recv_req.timestep_data}, Updated agent data: {recv_req.agent_data} evict: {self.tree_cache.evictable_size()}")
                 logger.critical(f"Memory stats: {self.token_to_kv_pool_allocator.get_memory_stats()}, page size: {self.token_to_kv_pool_allocator.page_size}")
                 logger.critical("==="*10)
+                self.last_lora_pool = self.lora_manager.memory_pool.list_loaded_lora_names()
                 self.batch_per_timestep = 0
                 self.activate_agent = set()
                 self.last_update_time = time.time()
